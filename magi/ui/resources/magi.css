@@ -1,0 +1,572 @@
+/*
+  MAGI console — Neon Genesis Evangelion display language.
+
+  Two rules the whole sheet follows.
+
+  1. **Amber on black, and colour means state.** Nothing is coloured for
+     decoration. Amber is the resting palette; green means an advisor is inside
+     the agreeing bloc; red means it dissents or the node is in trouble. If a
+     panel is green it is because something is actually green.
+
+  2. **Built for 800x480 behind glass, in daylight, at arm's length.** That is
+     the 7" kiosk. Type is large, contrast is maximal, and nothing important
+     depends on hue alone — every state also changes text.
+*/
+
+:root {
+  --black:      #000000;
+  --void:       #05060a;
+  --amber:      #ff9a1f;
+  --amber-dim:  #7a4a0d;
+  --amber-glow: #ffb75a;
+  --cyan:       #4ad9ff;
+  --green:      #3dff9e;
+  --red:        #ff3b30;
+  --grey:       #4a5568;
+
+  --grid: 12px;
+  --hair: 1px;
+
+  /* One shadow recipe, so every glowing element glows identically. Mixed
+     glow radii read as sloppiness rather than as depth. */
+  --glow: 0 0 4px currentColor, 0 0 12px color-mix(in srgb, currentColor 45%, transparent);
+
+  --mono: "DejaVu Sans Mono", "Menlo", "Consolas", ui-monospace, monospace;
+  --cjk: "Hiragino Sans", "Noto Sans CJK JP", "Yu Gothic", "MS Gothic", sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--black);
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: clamp(11px, 1.6vw, 15px);
+  overflow: hidden;
+  /* A kiosk has no cursor and no text selection. Both are only ever accidents
+     from a glove or a sleeve on a touchscreen. */
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Hexagonal honeycomb, very dim. The reference screens are dense with it; at
+   full strength it fights the text, which on a sunlit 7" panel is fatal. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image:
+    repeating-linear-gradient(60deg,  var(--amber-dim) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(-60deg, var(--amber-dim) 0 1px, transparent 1px 34px),
+    repeating-linear-gradient(0deg,   var(--amber-dim) 0 1px, transparent 1px 30px);
+  opacity: 0.10;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.scanlines {
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom, rgba(0, 0, 0, 0) 0 2px, rgba(0, 0, 0, 0.35) 2px 4px
+  );
+  pointer-events: none;
+  z-index: 100;
+  opacity: 0.5;
+}
+
+.console {
+  position: relative;
+  z-index: 1;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto auto auto;
+  gap: 6px;
+  padding: 8px 10px 10px;
+}
+
+/* ── Header ─────────────────────────────────────────────────────── */
+
+.hud {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 12px;
+  border-bottom: var(--hair) solid var(--amber-dim);
+  padding-bottom: 6px;
+}
+
+.kanji-plate { display: flex; flex-direction: column; line-height: 1; }
+.kanji-plate .kanji {
+  font-family: var(--cjk);
+  font-size: 2.1em;
+  font-weight: 700;
+  color: var(--amber);
+  text-shadow: var(--glow);
+}
+.kanji-plate .latin {
+  font-size: 0.62em;
+  letter-spacing: 0.28em;
+  color: var(--amber-dim);
+  margin-top: 2px;
+}
+.kanji-plate.right { text-align: right; }
+
+.code-block {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 14px;
+  align-content: start;
+  font-size: 0.72em;
+  letter-spacing: 0.08em;
+}
+.code-block div { display: flex; gap: 4px; }
+.code-block dt { color: var(--amber-dim); }
+.code-block dt::after { content: ":"; }
+.code-block dd { color: var(--amber); }
+
+/* ── The triad ──────────────────────────────────────────────────── */
+
+.triad {
+  position: relative;
+  display: grid;
+  /* Mirrors the reference frame exactly: BALTHASAR top-centre, CASPAR
+     bottom-left, MELCHIOR bottom-right, MAGI in the middle. */
+  grid-template-areas:
+    ".      top    ."
+    "left   core   right";
+  grid-template-columns: 1fr 1.15fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 6px;
+  min-height: 0;
+}
+
+.node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 10px 14px;
+  min-height: 0;
+  color: var(--amber);
+  background: color-mix(in srgb, currentColor 8%, var(--void));
+  border: 2px solid currentColor;
+  transition: color 240ms linear, background 240ms linear;
+}
+
+/* The angled corners of the reference panels. Each seat is cut on the side that
+   faces MAGI, so the three of them frame the core.
+
+   The padding on the cut side is not cosmetic: `clip-path` removes pixels, it
+   does not reflow text, so a summary laid out under the chamfer is silently
+   sliced mid-word. Each slot therefore reserves the height the cut takes away,
+   and the cuts are kept shallow enough that the reserved band stays affordable
+   on a 480px-tall panel. */
+.node[data-slot="top"] {
+  grid-area: top;
+  clip-path: polygon(0 0, 100% 0, 100% 74%, 82% 100%, 18% 100%, 0 74%);
+  /* Horizontal, not vertical. Only the outer 18% of the width is chamfered,
+     so keeping text inside that band is enough — and percentage padding on a
+     flex column resolves against WIDTH, so a vertical % here silently becomes
+     an enormous inset that pushes the name clean out of the box. */
+  padding-inline: 19%;
+  text-align: center;
+}
+.node[data-slot="left"] {
+  grid-area: left;
+  clip-path: polygon(0 0, 82% 0, 100% 26%, 100% 100%, 0 100%);
+  padding-right: 19%;
+}
+.node[data-slot="right"] {
+  grid-area: right;
+  clip-path: polygon(18% 0, 100% 0, 100% 100%, 0 100%, 0 26%);
+  padding-left: 19%;
+}
+
+.node-name {
+  font-size: 1.5em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-shadow: var(--glow);
+  white-space: nowrap;
+}
+.node-name .idx { opacity: 0.75; }
+
+.node-role {
+  font-size: 0.66em;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  opacity: 0.7;
+}
+
+/* Dimmer than the archetype and set apart from it: the role is what the
+   advisor is for, the model is an implementation detail that happens to matter
+   here because it is rotated so often. Reading order should hit the role
+   first. */
+.node-model {
+  font-size: 0.62em;
+  letter-spacing: 0.1em;
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.node-model::before { content: "▸ "; }
+
+.node-state {
+  font-family: var(--cjk);
+  font-size: 0.95em;
+  letter-spacing: 0.1em;
+  margin-top: 2px;
+}
+.node-state .en {
+  font-family: var(--mono);
+  font-size: 0.66em;
+  letter-spacing: 0.16em;
+  margin-left: 8px;
+  opacity: 0.85;
+}
+
+.node-summary {
+  font-size: 0.72em;
+  line-height: 1.35;
+  opacity: 0.9;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+/* State colours. Text changes with every one of them, so the display still
+   works for a colour-blind operator and in direct sun. */
+.node[data-state="idle"]     { color: var(--grey); }
+.node[data-state="thinking"] { color: var(--amber); animation: pulse 1.1s ease-in-out infinite; }
+.node[data-state="spoke"]    { color: var(--cyan); }
+.node[data-state="majority"] { color: var(--green); }
+.node[data-state="dissent"]  { color: var(--red); }
+.node[data-state="absent"]   { color: var(--red); opacity: 0.55; }
+.node[data-state="absent"] .node-summary { font-style: italic; }
+
+@keyframes pulse {
+  0%, 100% { background: color-mix(in srgb, currentColor 6%, var(--void)); }
+  50%      { background: color-mix(in srgb, currentColor 22%, var(--void)); }
+}
+
+/* The core. Small, because MAGI is the tally and not a fourth opinion — giving
+   it the visual weight of an advisor would misrepresent what it does. */
+.core {
+  grid-area: core;
+  align-self: center;
+  justify-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 6px 18px;
+  color: var(--amber);
+  border: var(--hair) solid var(--amber-dim);
+  background: var(--black);
+}
+.core-name {
+  font-size: 1.35em;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-shadow: var(--glow);
+}
+.core-state {
+  font-size: 0.62em;
+  letter-spacing: 0.2em;
+  color: var(--amber-dim);
+}
+.core[data-state="deliberating"] { animation: pulse 1.1s ease-in-out infinite; }
+.core[data-state="unanimous"] { color: var(--green); border-color: var(--green); }
+.core[data-state="majority"]  { color: var(--amber); border-color: var(--amber); }
+.core[data-state="deadlock"]  { color: var(--red); border-color: var(--red); }
+
+/*
+  At 800x480 the triad and a full verdict panel cannot both have the room they
+  want: with a long verdict the nodes were squeezed to 75px, which left the
+  summaries in the DOM at zero height — present, and invisible, which is the
+  worst of both.
+
+  Resolved by phase rather than by compromise. While the advisors deliberate,
+  their forming positions are the whole story and the triad owns the screen.
+  Once the verdict lands it repeats those positions in full, so the per-node
+  summaries have nothing left to add and yield their space to it.
+*/
+[data-phase="resolved"] .node-summary { display: none; }
+[data-phase="resolved"] .triad { flex: 0 0 auto; }
+
+/* ── Verdict ────────────────────────────────────────────────────── */
+
+.verdict {
+  border: 2px solid currentColor;
+  padding: 8px 12px;
+  max-height: 36vh;
+  overflow-y: auto;
+  color: var(--amber);
+  background: color-mix(in srgb, currentColor 8%, var(--black));
+}
+.verdict[data-outcome="UNANIMOUS"] { color: var(--green); }
+.verdict[data-outcome="MAJORITY"]  { color: var(--amber); }
+.verdict[data-outcome="DEADLOCK"]  { color: var(--red); }
+
+.verdict-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.verdict-kanji { font-family: var(--cjk); font-size: 1.1em; }
+.verdict-flag {
+  font-size: 1.05em;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-shadow: var(--glow);
+}
+.verdict-meta {
+  margin-left: auto;
+  font-size: 0.66em;
+  letter-spacing: 0.1em;
+  opacity: 0.7;
+}
+.verdict-answer { font-size: 0.92em; line-height: 1.4; color: var(--amber-glow); }
+.verdict[data-outcome="UNANIMOUS"] .verdict-answer { color: var(--green); }
+.verdict[data-outcome="DEADLOCK"] .verdict-answer { color: var(--amber-glow); }
+.verdict-note {
+  margin-top: 4px;
+  font-size: 0.74em;
+  line-height: 1.35;
+  opacity: 0.85;
+}
+.verdict-note::before { content: "▸ "; }
+
+/* ── Status flags ───────────────────────────────────────────────── */
+
+.status { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.flag {
+  padding: 3px 10px;
+  font-size: 0.68em;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  border: var(--hair) solid currentColor;
+  color: var(--grey);
+  white-space: nowrap;
+}
+.flag.ghost { border-style: dashed; opacity: 0.6; }
+
+.flag[data-state="ok"]      { color: var(--green); }
+.flag[data-state="caution"] { color: var(--amber); }
+.flag[data-state="warning"] { color: var(--amber); animation: blink 900ms steps(2) infinite; }
+.flag[data-state="alarm"]   { color: var(--red); animation: blink 500ms steps(2) infinite; }
+.flag[data-state="busy"]    { color: var(--cyan); }
+
+/* A flag you can press. Styled as one rather than as a floating icon because
+   the status row is already the strip of rectangular modules the reference
+   screens use, and a control that looks like the readouts beside it does not
+   have to be explained.
+
+   Full amber, not the dim variant. The first version used --amber-dim, which
+   is 2.8:1 against black — under the 4.5:1 minimum, and on a 7" panel in
+   daylight it simply was not there. The rule it broke is worth stating: an
+   actionable control must never be less visible than the passive readouts
+   around it. This one is now the brightest thing in the row, which is correct,
+   because it is the only thing in the row you can press. */
+.flag-btn {
+  background: transparent;
+  font-family: var(--mono);
+  color: var(--amber);
+  text-shadow: var(--glow);
+  cursor: pointer;
+  /* Comfortably past the 44px touch minimum in the axis that matters on a
+     touchscreen; the row is only ~24px tall, so width carries it. */
+  min-width: 132px;
+  min-height: 24px;
+}
+/* Filled on press, so a gloved thumb gets feedback the finger cannot feel. */
+.flag-btn:active { background: var(--amber); color: var(--black); text-shadow: none; }
+.flag-btn:hover { color: var(--amber-glow); }
+.fs-kanji { font-family: var(--cjk); letter-spacing: 0.05em; }
+
+@keyframes blink { 50% { opacity: 0.25; } }
+
+/* ── Draft ──────────────────────────────────────────────────────── */
+
+.draft {
+  border: var(--hair) solid var(--amber-dim);
+  padding: 5px 8px;
+  max-height: 22vh;
+  overflow-y: auto;
+}
+
+.draft-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 0.68em;
+  letter-spacing: 0.16em;
+  color: var(--amber-dim);
+  margin-bottom: 3px;
+}
+.draft-kanji { font-family: var(--cjk); font-size: 1.15em; color: var(--amber); }
+.draft-count { margin-left: auto; }
+
+.draft-lines { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+
+.draft-line {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.82em;
+  color: var(--amber-glow);
+}
+.draft-line .n { color: var(--amber-dim); font-variant-numeric: tabular-nums; }
+/* min-width:0 or the 1fr column refuses to shrink below its content and pushes
+   DEL onto its own row — the default `min-width: auto` on a grid item is the
+   usual cause of a control that mysteriously wraps. */
+.draft-line .t { line-height: 1.3; min-width: 0; }
+
+/* Delete is per line and always visible — no hover reveal. The kiosk is a
+   touchscreen: there is no hover, and a control that only appears on one is a
+   control that does not exist. */
+.btn-tiny {
+  background: transparent;
+  border: var(--hair) solid var(--amber-dim);
+  color: var(--amber-dim);
+  font-family: var(--mono);
+  font-size: 0.66em;
+  letter-spacing: 0.12em;
+  padding: 1px 7px;
+  cursor: pointer;
+  min-height: 22px;
+}
+.btn-tiny:active, .btn-tiny:hover { color: var(--red); border-color: var(--red); }
+
+.stt-hint {
+  font-size: 0.7em;
+  letter-spacing: 0.1em;
+  color: var(--amber-dim);
+  min-height: 1em;
+}
+.stt-hint[data-state="error"], .stt-hint[data-state="discarded"] { color: var(--red); }
+.stt-hint[data-state="transcribing"] { color: var(--cyan); }
+
+/* ── Input row ──────────────────────────────────────────────────── */
+
+.ask {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  border-top: var(--hair) solid var(--amber-dim);
+  padding-top: 8px;
+}
+
+.ask-label {
+  font-size: 0.7em;
+  letter-spacing: 0.18em;
+  color: var(--amber-dim);
+}
+.cursor { animation: blink 1s steps(2) infinite; }
+
+#question {
+  background: var(--void);
+  border: var(--hair) solid var(--amber-dim);
+  color: var(--amber-glow);
+  font-family: var(--mono);
+  font-size: 1em;
+  padding: 8px 10px;
+  min-width: 0;
+  user-select: text;
+}
+#question:focus { outline: none; border-color: var(--amber); box-shadow: var(--glow); }
+#question::placeholder { color: var(--amber-dim); }
+
+.btn-send {
+  font-family: var(--cjk);
+  font-size: 1em;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 1;
+  gap: 2px;
+  padding: 6px 14px;
+  background: var(--black);
+  border: 2px solid var(--amber);
+  color: var(--amber);
+  cursor: pointer;
+}
+.btn-send small {
+  font-family: var(--mono);
+  font-size: 0.5em;
+  letter-spacing: 0.2em;
+}
+.btn-send:active { background: var(--amber); color: var(--black); }
+
+/* PTT: round, big enough for a gloved thumb, and unmistakably the primary
+   control even while it is disabled. 44px is the smallest reliable touch
+   target; this is comfortably above it. */
+.btn-ptt {
+  position: relative;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  background: var(--black);
+  border: 2px solid var(--amber);
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 0.72em;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+.btn-ptt .ptt-ring {
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  border: var(--hair) solid currentColor;
+  opacity: 0.5;
+}
+.btn-ptt[disabled] {
+  color: var(--grey);
+  border-color: var(--grey);
+  cursor: not-allowed;
+}
+.btn-ptt.recording {
+  color: var(--red);
+  border-color: var(--red);
+  animation: pulse-ring 900ms ease-in-out infinite;
+}
+@keyframes pulse-ring {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--red) 60%, transparent); }
+  50%      { box-shadow: 0 0 0 10px transparent; }
+}
+
+/* ── Wider screens ──────────────────────────────────────────────── */
+
+@media (min-width: 1100px) {
+  .console { padding: 16px 22px 18px; gap: 10px; }
+  .node-summary { -webkit-line-clamp: 5; line-clamp: 5; }
+}
+
+/* Anything short enough that the verdict would push the triad off-screen: the
+   triad is the display's reason to exist, so the prose yields, not the nodes. */
+@media (max-height: 520px) {
+  .verdict-answer { font-size: 0.84em; }
+  /* One line, because on the kiosk the summary is a glance, not a read: the
+     full position lives in the verdict panel and on the server's record. */
+  .node-summary { -webkit-line-clamp: 1; line-clamp: 1; }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; }
+  .scanlines { display: none; }
+}

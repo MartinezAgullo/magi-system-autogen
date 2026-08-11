@@ -1,0 +1,112 @@
+<!doctype html>
+<!--
+  MAGI console.
+
+  Deliberately no build step and no external fonts or scripts: the Pi has to be
+  able to render its own screen with no network and nothing installed. Every
+  glyph here is either ASCII or CJK from the system font stack.
+
+  The Japanese and German are chrome, not content. Every load-bearing string —
+  the verdict, the positions, the status flags — is English, per the project's
+  one-language rule. The kanji label panels; they never carry information the
+  operator cannot get in English on the same screen.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>MAGI SYSTEM</title>
+  <link rel="stylesheet" href="/static/magi.css">
+</head>
+<body>
+  <div class="scanlines" aria-hidden="true"></div>
+
+  <main class="console">
+
+    <!-- ── Header ────────────────────────────────────────────────── -->
+    <header class="hud">
+      <div class="kanji-plate left">
+        <span class="kanji">質&nbsp;問</span>
+        <span class="latin">INTERROGATION</span>
+      </div>
+
+      <dl class="code-block" id="code-block">
+        <div><dt>CODE</dt><dd id="m-code">----</dd></div>
+        <div><dt>FILE</dt><dd>MAGI_SYS</dd></div>
+        <div><dt>NODE</dt><dd id="m-node">----</dd></div>
+        <div><dt>EX_MODE</dt><dd id="m-engine">----</dd></div>
+        <div><dt>PRIORITY</dt><dd id="m-priority">A--</dd></div>
+      </dl>
+
+      <div class="kanji-plate right">
+        <span class="kanji">解&nbsp;決</span>
+        <span class="latin">RESOLUTION</span>
+      </div>
+    </header>
+
+    <!-- ── The voting triad ──────────────────────────────────────── -->
+    <section class="triad" id="triad" aria-label="MAGI deliberation nodes">
+      <!-- Nodes are injected from /api/config: the roster is configuration,
+           so a fourth advisor in the YAML appears here without a code change. -->
+      <div class="core" id="core">
+        <span class="core-name">MAGI</span>
+        <span class="core-state" id="core-state">STANDBY</span>
+      </div>
+    </section>
+
+    <!-- ── Verdict ───────────────────────────────────────────────── -->
+    <section class="verdict" id="verdict" hidden>
+      <div class="verdict-head">
+        <span class="verdict-kanji" id="verdict-kanji">決&nbsp;議</span>
+        <span class="verdict-flag" id="verdict-flag">—</span>
+        <span class="verdict-meta" id="verdict-meta"></span>
+      </div>
+      <p class="verdict-answer" id="verdict-answer"></p>
+      <p class="verdict-note" id="verdict-dissent" hidden></p>
+      <p class="verdict-note" id="verdict-split" hidden></p>
+    </section>
+
+    <!-- ── Status flags ──────────────────────────────────────────── -->
+    <footer class="status">
+      <span class="flag" id="flag-link" data-state="unknown">LINK</span>
+      <span class="flag" id="flag-condition" data-state="unknown">CONDITION —</span>
+      <span class="flag" id="flag-temp" data-state="unknown">TEMP —</span>
+      <span class="flag" id="flag-phase" data-state="idle">STANDBY</span>
+      <span class="flag ghost" id="flag-round">RUNDE —</span>
+      <span class="flag ghost" id="flag-calls">0 CALLS</span>
+      <button type="button" class="flag flag-btn" id="fullscreen" hidden>
+        <span class="fs-kanji">全画面</span> <span id="fs-label">FULLSCREEN</span>
+      </button>
+    </footer>
+
+    <!-- ── Draft ─────────────────────────────────────────────────────
+         One line per PTT press. A press never starts a debate: the operator
+         reads back what was heard, drops what was mangled, and only SEND
+         spends three models' time on it. -->
+    <section class="draft" id="draft" hidden>
+      <div class="draft-head">
+        <span class="draft-kanji">草&nbsp;案</span>
+        <span class="draft-label">DRAFT</span>
+        <span class="draft-count" id="draft-count"></span>
+        <button type="button" class="btn-tiny" id="draft-clear">CLEAR ALL</button>
+      </div>
+      <ol class="draft-lines" id="draft-lines"></ol>
+    </section>
+
+    <!-- ── Input ─────────────────────────────────────────────────── -->
+    <form class="ask" id="ask">
+      <label class="ask-label" for="question">question<span class="cursor">_</span></label>
+      <input id="question" name="question" type="text" autocomplete="off"
+             spellcheck="false" placeholder="state the matter for deliberation">
+      <button type="submit" class="btn-send" id="send">送信<small>SEND</small></button>
+      <button type="button" class="btn-ptt" id="ptt" disabled>
+        <span class="ptt-ring"></span><span class="ptt-label">PTT</span>
+      </button>
+    </form>
+    <p class="stt-hint" id="stt-hint" hidden></p>
+
+  </main>
+
+  <script src="/static/magi.js"></script>
+</body>
+</html>

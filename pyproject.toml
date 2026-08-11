@@ -1,0 +1,80 @@
+# Single package, flat at the repo root.
+#
+# Not a uv workspace: workspaces exist for multi-package repos (LATACC has one
+# per agent), and MAGI has exactly one deliverable. Wrapping it in
+# packages/*/src/ would be three directory levels earning nothing.
+#
+# The import package is `magi`, not `magi_autogen`, deliberately: the sibling
+# no-framework repo uses the same name, so the files the two share by contract
+# (models.py, personas.py, orchestrator/consensus.py, the metrics schema) sit at
+# identical paths and can be diffed directly.
+[project]
+name = "magi-system-autogen"
+version = "0.1.0"
+description = "Voice-first multi-agent deliberation on a Raspberry Pi 5: three LLMs debate until consensus (AutoGen implementation)"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "Martinez Agullo, Pablo", email = "pmartineza@indra.es"}]
+license = "GPL-3.0-or-later"
+dependencies = [
+    # Core
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.2",
+    "pyyaml>=6.0",
+    # The framework under evaluation. See README § Choice of framework.
+    # autogen-ext[openai] rather than [ollama]: one dependency instead of two,
+    # and the same client class serves Ollama's /v1 endpoint and a real
+    # API-key provider by swapping base_url.
+    "autogen-agentchat>=0.4",
+    "autogen-ext[openai]>=0.4",
+    # UI
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "websockets>=12",
+    # Observability
+    "opentelemetry-api>=1.25",
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+    "opentelemetry-instrumentation-httpx>=0.46b0",
+    "opentelemetry-instrumentation-fastapi>=0.46b0",
+    "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.4"]
+
+# Speech is an extra, not a core dependency, because it is the heaviest thing
+# in the tree and nothing imports it yet. `faster-whisper` pulls `ctranslate2`,
+# which on a Raspberry Pi means a long install for a capability the debate
+# benchmark does not use. Splitting it out is what lets the Pi be measured now
+# rather than after an afternoon of wheels.
+#
+# Once stt.py and tts.py exist, a node that answers by voice installs
+# `--extra voice`; a node used only for benchmarking does not.
+voice = ["faster-whisper>=1.0", "piper-tts>=1.2"]
+
+[project.scripts]
+magi = "magi.main:main"
+magi-preflight = "magi.preflight:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["magi"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["magi"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

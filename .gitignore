@@ -1,0 +1,15 @@
+.env
+data/
+*.db
+*.db-shm
+*.db-wal
+traces.jsonl
+
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+.DS_Store

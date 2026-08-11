@@ -1,0 +1,34 @@
+# Observability stack only — there is NO Dockerfile for MAGI itself.
+#
+# The node runs under systemd on a Raspberry Pi and needs the browser's
+# microphone, a Piper binary and the host's audio device. Containerising that
+# would buy isolation nobody asked for and cost the two things the project
+# actually measures: process CPU and resident memory. `psutil` inside a
+# container reports the container's view, which is not the number we want.
+#
+# What genuinely wants a container is the trace backend. Pre-flight warns when
+# no OTLP collector answers; this is the one command that fixes it.
+#
+#   cd docker && docker compose up -d
+#   open http://localhost:16686
+#
+# Point the node at it with MAGI_OTEL_ENDPOINT=http://<this-host>:4318
+
+name: magi-observability
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: magi-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      # Traces live in memory: this is a development backend for reading one
+      # debate at a time, not the durable record. That is SQLite's job, and it
+      # is why a missing collector is only ever a warning.
+      SPAN_STORAGE_TYPE: memory
+      MEMORY_MAX_TRACES: "20000"
+    ports:
+      - "16686:16686"   # UI
+      - "4318:4318"     # OTLP/HTTP — what MAGI_OTEL_ENDPOINT points at
+      - "4317:4317"     # OTLP/gRPC
