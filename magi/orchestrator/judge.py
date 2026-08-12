@@ -47,6 +47,7 @@ async def judge_disagreement(
     turns: Mapping[str, MagiTurn],
     order: Sequence[str],
     counter: CallCounter | None = None,
+    on_activity=None,
 ) -> JudgeRuling | None:
     """Return the ruling, or ``None`` if the judge could not be reached.
 
@@ -61,7 +62,15 @@ async def judge_disagreement(
         # critical path, and leaving it out understates the cost of every split
         # vote. Caught by the traces themselves — 11 `chat` spans against a
         # recorded count of 10.
-        model_client=build_client(settings, personas, personas.orchestrator, counter),
+        # Deliberately left under the orchestrator's label rather than a "JUDGE"
+        # one: the label is also what the console lights up, and the judge is
+        # MAGI's own work on the critical path. A separate label would leave the
+        # core panel dark for the 3-4 s it runs. The span name (SPAN_JUDGE)
+        # already separates it for anyone reading traces.
+        model_client=build_client(
+            settings, personas, personas.orchestrator, counter,
+            on_activity=on_activity,
+        ),
         system_message=JUDGE_SYSTEM_PROMPT,
         output_content_type=JudgeRuling,
     )

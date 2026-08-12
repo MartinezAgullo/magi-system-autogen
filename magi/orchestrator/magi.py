@@ -56,6 +56,7 @@ from magi.constants import (
     SPAN_TURN,
     TERMINATED_BY_ERROR,
     TERMINATED_BY_INSUFFICIENT,
+    TOPIC_ACTIVITY,
     TOPIC_QUESTION,
     TOPIC_TURN,
     TOPIC_VERDICT,
@@ -117,7 +118,8 @@ class Magi:
 
         async def ask(persona) -> tuple[str, MagiTurn | None]:
             agent = build_advisor(
-                self._settings, self._personas, persona, self._counter
+                self._settings, self._personas, persona, self._counter,
+                self._publish_activity,
             )
             with tracer.start_as_current_span(SPAN_TURN) as span:
                 span.set_attribute(ATTR_ADVISOR, persona.name)
@@ -151,7 +153,9 @@ class Magi:
         self, question: str, blind: Mapping[str, MagiTurn]
     ) -> tuple[dict[str, MagiTurn], str, int]:
         """Run the group chat. Returns the final turns, what stopped it, and rounds used."""
-        advisors = build_advisors(self._settings, self._personas, self._counter)
+        advisors = build_advisors(
+            self._settings, self._personas, self._counter, self._publish_activity
+        )
         present = [a for a in advisors if a.name in blind]
         if len(present) < 2:
             logger.warning("Fewer than two advisors answered — skipping deliberation")
@@ -234,7 +238,9 @@ class Magi:
     ) -> MagiVerdict:
         """Write the spoken answer for an outcome that is already decided."""
         order = [p.name for p in self._personas.magi]
-        agent = _as_verdict_agent(self._settings, self._personas, self._counter)
+        agent = _as_verdict_agent(
+            self._settings, self._personas, self._counter, self._publish_activity
+        )
 
         absent = [name for name in order if name not in turns]
         task = prompts.verdict_task(
@@ -305,7 +311,8 @@ class Magi:
             if not result.unanimous and len(turns) > 1:
                 with tracer.start_as_current_span(SPAN_JUDGE) as judge_span:
                     ruling = await judge_disagreement(
-                        self._settings, self._personas, turns, order, self._counter
+                        self._settings, self._personas, turns, order, self._counter,
+                        self._publish_activity,
                     )
                     judge_span.set_attribute("magi.judge_ran", ruling is not None)
                     if ruling is not None:
@@ -367,6 +374,17 @@ class Magi:
 
     # ── Helpers ──────────────────────────────────────────────────────────
 
+    async def _publish_activity(self, name: str, busy: bool) -> None:
+        """Who has an LLM call open, as it opens and closes.
+
+        Handed to every model client this orchestrator builds. A debate is
+        30-90 s of one advisor generating with nothing to show for it until the
+        turn lands, and a console that renders only completed turns spends that
+        whole time looking like it has crashed.
+        """
+        if self._bus is not None:
+            await self._bus.publish(TOPIC_ACTIVITY, {"advisor": name, "busy": busy})
+
     async def _publish_turn(self, name: str, turn: MagiTurn, round_index: int) -> None:
         logger.info("  %-10s r%d  %s", name, round_index, turn.summary.strip())
         if self._bus is not None:
@@ -376,7 +394,9 @@ class Magi:
             )
 
 
-def _as_verdict_agent(settings: Settings, personas: PersonaSet, counter=None):
+def _as_verdict_agent(
+    settings: Settings, personas: PersonaSet, counter=None, on_activity=None
+):
     """The orchestrator agent, typed to ``MagiVerdict``.
 
     Not a ``SocietyOfMindAgent``, which is what the design originally called
@@ -390,7 +410,9 @@ def _as_verdict_agent(settings: Settings, personas: PersonaSet, counter=None):
 
     return AssistantAgent(
         name=personas.orchestrator.name,
-        model_client=build_client(settings, personas, personas.orchestrator, counter),
+        model_client=build_client(
+            settings, personas, personas.orchestrator, counter, on_activity=on_activity
+        ),
         system_message=personas.system_prompt_for(personas.orchestrator),
         output_content_type=MagiVerdict,
     )

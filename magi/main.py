@@ -45,8 +45,19 @@ def _banner(settings: Settings, personas: personas_mod.PersonaSet) -> None:
     )
     for persona in personas.magi:
         logger.info("  %-10s %-14s %s", persona.name, persona.archetype, persona.model)
+    # NOT "orchestrator", however the YAML key reads. The orchestrator is the
+    # `Magi` class in orchestrator/magi.py — it drives the phases, tallies the
+    # votes and decides the outcome. The *agent* named MAGI only writes the
+    # sentences that get spoken, for an outcome it is handed as a constraint.
+    # Printing "orchestrator" next to a model tag told the operator that a 12B
+    # model was in charge of the verdict, which is the one thing this design
+    # deliberately never does.
+    #
+    # The same persona also backs the JUDGE agent and, under autogen_selector,
+    # the speaker-selection client — but the name in the left column is MAGI's,
+    # so the role printed beside it is MAGI's.
     logger.info(
-        "  %-10s %-14s %s", personas.orchestrator.name, "orchestrator",
+        "  %-10s %-14s %s", personas.orchestrator.name, "verdict writer",
         personas.orchestrator.model,
     )
     ui_display = "localhost" if settings.ui_host in ("0.0.0.0", "::") else settings.ui_host

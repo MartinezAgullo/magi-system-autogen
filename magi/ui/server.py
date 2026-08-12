@@ -27,6 +27,7 @@ from magi.bus import Bus
 from magi.config import Settings
 from magi.constants import (
     SPAN_STT,
+    TOPIC_ACTIVITY,
     TOPIC_DRAFT,
     TOPIC_QUESTION,
     TOPIC_STATUS,
@@ -69,7 +70,8 @@ class _FreshStatics(StaticFiles):
 #: browser — the forwarder is generic on purpose, so a new panel needs no
 #: change to the transport.
 FORWARDED = (
-    TOPIC_QUESTION, TOPIC_TURN, TOPIC_VERDICT, TOPIC_STATUS, TOPIC_DRAFT, TOPIC_STT
+    TOPIC_QUESTION, TOPIC_TURN, TOPIC_VERDICT, TOPIC_STATUS, TOPIC_DRAFT, TOPIC_STT,
+    TOPIC_ACTIVITY,
 )
 
 

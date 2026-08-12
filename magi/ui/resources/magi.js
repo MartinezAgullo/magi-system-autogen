@@ -41,9 +41,17 @@ const OUTCOME = {
 
 const $ = (id) => document.getElementById(id);
 
+// Shown while an agent has an LLM call open. Separate from the node state
+// because the two answer different questions: `data-state` is where this
+// advisor stands, `data-busy` is whether it is speaking right now. Folding them
+// into one would mean a node that has stated a position and is now being asked
+// again could only show one of the two, and both matter.
+const BUSY_LABEL = { jp: "&#x6F14;&#x7B97;&#x4E2D;", en: "GENERATING" };
+
 const state = {
   advisors: [],          // [{name, archetype, model}]
-  nodes: new Map(),      // name -> {el, nameEl, stateEl, summaryEl}
+  nodes: new Map(),      // name -> {el, nameEl, stateEl, summaryEl, busyEl}
+  orchestrator: "",      // the verdict writer's name, which lights the core
   debating: false,
   calls: 0,
   socket: null,        // PTT audio rides this same connection
@@ -55,6 +63,7 @@ async function boot() {
   const config = await fetch("/api/config").then((r) => r.json());
 
   state.advisors = config.advisors;
+  state.orchestrator = config.orchestrator || "";
   $("m-node").textContent = config.node_id;
   $("m-engine").textContent = config.engine.replace("autogen_", "").toUpperCase();
   $("m-priority").textContent = `A${"-".repeat(Math.max(0, config.max_rounds - 1))}`;
@@ -81,6 +90,7 @@ function buildTriad(advisors) {
       <div class="node-role"></div>
       <div class="node-model"></div>
       <div class="node-state"></div>
+      <div class="node-busy" hidden>${BUSY_LABEL.jp}<span class="en">${BUSY_LABEL.en}</span></div>
       <div class="node-summary"></div>`;
     // textContent for both: an archetype and a model tag both come from
     // config/magi.yaml, which is a file someone edits by hand.
@@ -96,6 +106,7 @@ function buildTriad(advisors) {
       el,
       stateEl: el.querySelector(".node-state"),
       summaryEl: el.querySelector(".node-summary"),
+      busyEl: el.querySelector(".node-busy"),
     });
     // A node that has never been asked anything still owes the operator a
     // state. Left empty it reads as a panel that failed to load rather than
@@ -121,6 +132,7 @@ function connect() {
     else if (topic === "status") onStatus(data);
     else if (topic === "draft") onDraft(data);
     else if (topic === "stt") onStt(data);
+    else if (topic === "activity") onActivity(data);
   };
 
   const dropped = () => {
@@ -151,6 +163,9 @@ function onQuestion(data) {
   $("core-state").textContent = "IN SESSION";
 
   // Everyone starts thinking at once: phase A runs the advisors in parallel.
+  // The per-advisor GENERATING flags arrive on their own as each call opens;
+  // this only resets whatever the previous debate left behind.
+  clearBusy();
   for (const [name, node] of state.nodes) {
     setNode(name, "thinking", "");
     node.summaryEl.textContent = "";
@@ -162,9 +177,55 @@ function onTurn(data) {
   setFlag("flag-round", `RUNDE ${data.round_index}`, null);
 }
 
+/*
+  Who is generating right now.
+
+  This is the only thing on screen that moves during the long stretches. A turn
+  takes 13-30 s in the blind round and the deliberation runs about 90 s, all of
+  which the console previously spent showing the same static panels — the system
+  looks most broken exactly when it is working hardest.
+
+  Under autogen_roundrobin one advisor generates at a time, so this also shows
+  the turn order as it happens; in the blind round all three light at once, and
+  the one still lit after the others go quiet is the model gating the phase.
+*/
+function onActivity(data) {
+  const name = (data.advisor || "").toUpperCase();
+  const busy = Boolean(data.busy);
+
+  if (state.nodes.has(name)) {
+    setBusy(state.nodes.get(name).el, state.nodes.get(name).busyEl, busy);
+    return;
+  }
+  // The verdict writer and the judge both run under the orchestrator's name and
+  // both belong to the core. Anything else — the speaker selector, a future
+  // agent — is deliberately not drawn: the display never invents a panel for
+  // something it cannot place.
+  if (name && name === state.orchestrator.toUpperCase()) {
+    $("core").dataset.busy = busy ? "1" : "0";
+  }
+}
+
+function setBusy(el, busyEl, busy) {
+  el.dataset.busy = busy ? "1" : "0";
+  // Hidden rather than dimmed, and carrying its own words: colour and motion
+  // both mean something here, so neither is allowed to be the only signal.
+  if (busyEl) busyEl.hidden = !busy;
+}
+
+function clearBusy() {
+  for (const node of state.nodes.values()) setBusy(node.el, node.busyEl, false);
+  $("core").dataset.busy = "0";
+}
+
 function onVerdict(record) {
   state.debating = false;
   document.body.dataset.phase = "resolved";
+  // Belt and braces. Every call clears its own indicator in a `finally`, but a
+  // debate cancelled by barge-in can drop the last frame, and a node left
+  // pulsing after the verdict has landed would be the console asserting more
+  // than the daemon told it.
+  clearBusy();
 
   const spec = OUTCOME[record.outcome] || { jp: "?", core: "deadlock" };
   const panel = $("verdict");

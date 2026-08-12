@@ -34,6 +34,12 @@ TOPIC_STATUS = "status"           # connectivity and backend health
 TOPIC_SPEAK = "speak"             # text queued for TTS
 TOPIC_DRAFT = "draft"             # the question under composition, after every edit
 TOPIC_STT = "stt"                 # per-press recognition feedback (busy, empty, error)
+# Which agent has an LLM call open right now. Emitted at the model client, so it
+# covers every call regardless of who makes it, and arrives 30-90 s before the
+# turn it will eventually produce — which is the entire point. TOPIC_TURN only
+# fires when an advisor has finished; between those the console had nothing to
+# say and looked broken for as long as the system was working hardest.
+TOPIC_ACTIVITY = "activity"
 
 # ── OpenTelemetry ────────────────────────────────────────────────────────────
 
@@ -79,6 +85,12 @@ ATTR_SELECTOR_CALLS = "magi.selector_calls"
 #: retried with more room. Worth querying: a model that trips this often is one
 #: that does not belong on a latency-bounded interface.
 ATTR_LENGTH_RETRY = "magi.length_retry"
+#: Set on calls that went through `create_stream` rather than `create`. On the
+#: span rather than inferred, because the two paths differ in ways that matter
+#: to a benchmark: streaming adds per-chunk work on the node whose CPU is the
+#: object of study, and the length retry does not exist on it. A run that mixed
+#: the two without recording which was which would be uninterpretable.
+ATTR_STREAMED = "magi.streamed"
 
 # One retry, at double the budget. Bounded on purpose — an unbounded escalation
 # would trade a visible failure for an invisible latency cliff, on a node whose

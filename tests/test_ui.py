@@ -18,7 +18,13 @@ from fastapi.testclient import TestClient
 
 from magi.bus import Bus
 from magi.config import Settings
-from magi.constants import TOPIC_STATUS, TOPIC_STT, TOPIC_TURN, TOPIC_VERDICT
+from magi.constants import (
+    TOPIC_ACTIVITY,
+    TOPIC_STATUS,
+    TOPIC_STT,
+    TOPIC_TURN,
+    TOPIC_VERDICT,
+)
 from magi.models import MagiTurn, TurnRecord
 from magi.personas import PersonaSet
 from magi.services.draft import Draft
@@ -201,6 +207,10 @@ def test_forwarded_covers_what_the_orchestrator_publishes():
     assert TOPIC_TURN in FORWARDED
     assert TOPIC_VERDICT in FORWARDED
     assert TOPIC_STATUS in FORWARDED
+    # Without this the console shows nothing at all for the 13-30 s of a blind
+    # round and the ~90 s of deliberation, which is precisely when an operator
+    # concludes the node has hung.
+    assert TOPIC_ACTIVITY in FORWARDED
 
 
 # ── Speech and the draft ─────────────────────────────────────────────────────
