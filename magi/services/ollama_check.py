@@ -107,6 +107,7 @@ async def probe_structured_output(
     max_tokens: int = PROBE_MAX_TOKENS,
     temperature: float = 0.3,
     thinking: bool | None = None,
+    stream: bool = False,
 ) -> tuple[bool, str]:
     """Ask *model* for one ``MagiTurn`` and judge whether it is usable.
 
@@ -130,6 +131,12 @@ async def probe_structured_output(
     prompt produces thin answers from every model, which had this probe
     condemning models that were fine and would have had it bless models that
     were not.
+
+    ``stream`` follows the advisor's own setting, and for the same reason as the
+    prompt: the streaming and non-streaming paths do not fail in the same ways.
+    Structured output goes through a stricter helper when streamed, and token
+    usage is only reported if it is asked for. An advisor configured to stream
+    and verified without streaming has not been verified.
 
     Returns ``(ok, detail)``.
     """
@@ -158,26 +165,27 @@ async def probe_structured_output(
 
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
+    if stream:
+        payload["stream"] = True
+        # Without this an OpenAI-compatible stream reports no token usage at
+        # all, which is the same trap InstrumentedChatClient.create_stream
+        # defaults around. Probing without it would bless a configuration that
+        # then silently measures nothing.
+        payload["stream_options"] = {"include_usage": True}
+
     try:
-        resp = await client.post(
-            f"{base_url}/chat/completions",
-            json=payload,
-            headers=headers,
-            timeout=SCHEMA_PROBE_TIMEOUT_S,
+        message, error = (
+            await _post_streaming(client, base_url, payload, headers)
+            if stream
+            else await _post_once(client, base_url, payload, headers)
         )
     except httpx.TimeoutException:
         return False, f"timed out after {SCHEMA_PROBE_TIMEOUT_S:.0f}s (cold model load?)"
     except httpx.HTTPError as exc:
         return False, f"request failed: {exc}"
 
-    if resp.status_code != httpx.codes.OK:
-        body = resp.text[:200].replace("\n", " ")
-        return False, f"HTTP {resp.status_code}: {body}"
-
-    try:
-        message = resp.json()["choices"][0]["message"]
-    except (KeyError, IndexError, json.JSONDecodeError) as exc:
-        return False, f"unexpected response envelope: {exc}"
+    if error is not None:
+        return False, error
 
     content = (message.get("content") or "").strip()
     if not content:
@@ -201,10 +209,122 @@ async def probe_structured_output(
             f"{len(turn.position.strip())} chars ({turn.position.strip()!r})"
         )
 
-    return True, f"valid MagiTurn, {len(turn.position)} chars of position"
+    suffix = " (streamed)" if stream else ""
+    return True, f"valid MagiTurn, {len(turn.position)} chars of position{suffix}"
+
+
+async def _post_once(
+    client: httpx.AsyncClient, base_url: str, payload: dict, headers: dict
+) -> tuple[dict, str | None]:
+    """One non-streaming completion, unwrapped to its message."""
+    resp = await client.post(
+        f"{base_url}/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=SCHEMA_PROBE_TIMEOUT_S,
+    )
+    if resp.status_code != httpx.codes.OK:
+        return {}, f"HTTP {resp.status_code}: {resp.text[:200]}".replace("\n", " ")
+    try:
+        return resp.json()["choices"][0]["message"], None
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        return {}, f"unexpected response envelope: {exc}"
+
+
+async def _post_streaming(
+    client: httpx.AsyncClient, base_url: str, payload: dict, headers: dict
+) -> tuple[dict, str | None]:
+    """One streamed completion, reassembled into the same shape as a plain one.
+
+    Reassembled by hand rather than through AutoGen's client because pre-flight
+    must not need an agent to answer "does this advisor work". Same reasoning as
+    the rest of this module: it speaks HTTP to the endpoint AutoGen will speak
+    to, and checks the answer.
+
+    ``reasoning`` is accumulated separately and deliberately. Ollama sends its
+    reasoning deltas under that key, AutoGen reads ``reasoning_content`` and so
+    drops them, and the empty-content branch downstream needs to be able to tell
+    "spent the budget thinking" from "produced nothing at all".
+    """
+    content: list[str] = []
+    reasoning: list[str] = []
+    chunks = 0
+
+    async with client.stream(
+        "POST",
+        f"{base_url}/chat/completions",
+        json=payload,
+        headers=headers,
+        timeout=SCHEMA_PROBE_TIMEOUT_S,
+    ) as resp:
+        if resp.status_code != httpx.codes.OK:
+            body = (await resp.aread())[:200].decode(errors="replace")
+            return {}, f"HTTP {resp.status_code}: {body}".replace("\n", " ")
+
+        async for line in resp.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                delta = json.loads(data)["choices"][0]["delta"]
+            except (KeyError, IndexError, json.JSONDecodeError):
+                # A usage-only trailer carries no choices. Not an error.
+                continue
+            chunks += 1
+            if delta.get("content"):
+                content.append(delta["content"])
+            for key in ("reasoning", "reasoning_content"):
+                if delta.get(key):
+                    reasoning.append(delta[key])
+
+    if chunks == 0:
+        return {}, "streaming produced no chunks at all"
+
+    return {"content": "".join(content), "reasoning": "".join(reasoning)}, None
 
 
 # ── The checks ───────────────────────────────────────────────────────────────
+
+
+def _check_streaming_config(report: PreflightReport, personas: PersonaSet) -> None:
+    """Warn about the one configuration combination streaming makes dangerous.
+
+    A streamed call cannot be retried at a wider budget: by the time the model
+    reports it ran out, chunks are already with the consumer. A reasoning
+    advisor is exactly the one that needs that retry, because how much budget it
+    spends thinking varies with the question and no fixed number is reliably
+    enough. Combining the two removes the safety net from the seat most likely
+    to need it, and the group chat has no notion of a participant dropping out,
+    so the whole debate goes down with it.
+
+    A **warning**, not an error. The operator may be debugging, may have raised
+    the budget to cover it, or may simply want to watch the tokens arrive. The
+    node's job is to say what it costs, not to refuse.
+
+    Expressed over the persona's settings rather than its name or its model tag,
+    so a rotated roster carries the check with it.
+    """
+    streaming = personas.streaming_names()
+    if not streaming:
+        return
+
+    report.add("ok", "Streaming enabled for: " + ", ".join(streaming))
+
+    exposed = [
+        p.name
+        for p in personas.magi
+        if personas.stream_for(p) and personas.thinking_for(p)
+    ]
+    if exposed:
+        report.add(
+            "warn",
+            f"{', '.join(exposed)} stream while reasoning — a turn that exhausts "
+            f"its token budget cannot be retried and will take the debate down",
+            "Either set `stream: false` for those advisors, or raise their",
+            "`max_tokens` enough that the retry is never needed.",
+        )
 
 
 def _check_keep_alive(
@@ -286,6 +406,8 @@ async def _check_ollama(
 
         report.add("ok", "All configured models are pulled: " + ", ".join(sorted(wanted)))
 
+        _check_streaming_config(report, personas)
+
         # ── Structured output (hard) ────────────────────────────────────
         # Probed per ADVISOR rather than per model: the same model behaves
         # differently under a different system prompt and a different thinking
@@ -305,6 +427,7 @@ async def _check_ollama(
                     max_tokens=personas.max_tokens_for(persona) or PROBE_MAX_TOKENS,
                     temperature=personas.temperature_for(persona) or 0.3,
                     thinking=personas.thinking_for(persona),
+                    stream=personas.stream_for(persona),
                 )
                 if ok:
                     break

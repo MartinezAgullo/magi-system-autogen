@@ -29,6 +29,8 @@ Consequently this repo commits to AutoGen fully: where a choice exists between d
 
 **Voice-first, end to end.** Hold PTT, speak, release: the phrase is transcribed on the node and appears as a deletable line, and SEND commits the question so the three advisors argue it out on the console. Both engines work, verified on the Pi.
 
+**Watchable while it thinks.** The console shows which advisor is generating right now, and the terminal can show the sentence forming: set `stream: true` on an advisor in `config/magi.yaml` and its position is drawn live, then erased when complete so the one-line log lands in its place. Off by default, and per advisor rather than global — a streamed call gives up the wider-budget retry, so the reasoning seat should not take it. Pre-flight verifies streaming advisors over the streaming path and warns about that combination.
+
 Still to build: the SQLite benchmark store, and TTS so the verdict is spoken as well as shown. See `CLAUDE.md` § Status.
 
 The load-bearing assumption is **verified**: as of 2026-08-11, on Ollama 0.23.2, all three default advisors return a `MagiTurn` that is both schema-valid and substantive over the OpenAI-compatible endpoint. Getting there needed two per-model settings that are not obvious and are documented in `config/magi.yaml`: reasoning must stay **on** for `nemotron3:33b` (it produces nothing valid with it suppressed) and **off** for `gemma3:12b` (3/5 valid with it on, 5/5 with it off), and a reasoning model needs roughly triple the token budget because it spends it before writing any answer.

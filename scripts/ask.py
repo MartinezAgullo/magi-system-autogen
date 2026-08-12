@@ -15,10 +15,12 @@ import asyncio
 import sys
 
 from magi import personas as personas_mod
+from magi.bus import Bus
 from magi.config import Settings
 from magi.models import Outcome
 from magi.orchestrator import Magi
 from magi.services.metrics import process_stats
+from magi.services.stream_view import render_stream
 from magi.setup.setup_logs import setup_logging
 from magi.setup.setup_tracing import setup_tracing, shutdown_tracing
 
@@ -51,10 +53,17 @@ async def main() -> int:
     personas = personas_mod.load(settings.personas_file)
     provider = setup_tracing(settings)
 
+    # A bus only so the token stream has somewhere to arrive. Advisors with
+    # `stream: false` — all of them, by default — publish nothing here, so this
+    # costs one queue and no output unless the persona file asked for it.
+    bus = Bus()
+    streamer = asyncio.create_task(render_stream(bus, quiet=args.quiet))
+
     try:
-        magi = Magi(settings, personas, tracer_provider=provider)
+        magi = Magi(settings, personas, bus=bus, tracer_provider=provider)
         record = await magi.debate(" ".join(args.question))
     finally:
+        streamer.cancel()
         # Spans are exported in batches, so without this the run you are
         # waiting to look at is exactly the one that never reaches the backend.
         shutdown_tracing()

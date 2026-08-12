@@ -26,7 +26,10 @@ from collections.abc import Mapping
 
 from autogen_agentchat.base import TaskResult
 from autogen_agentchat.conditions import ExternalTermination
-from autogen_agentchat.messages import StructuredMessage
+from autogen_agentchat.messages import (
+    ModelClientStreamingChunkEvent,
+    StructuredMessage,
+)
 
 from magi.bus import Bus
 from magi.config import Settings
@@ -57,6 +60,7 @@ from magi.constants import (
     TERMINATED_BY_ERROR,
     TERMINATED_BY_INSUFFICIENT,
     TOPIC_ACTIVITY,
+    TOPIC_CHUNK,
     TOPIC_QUESTION,
     TOPIC_TURN,
     TOPIC_VERDICT,
@@ -111,6 +115,25 @@ class Magi:
 
     # ── Phases ───────────────────────────────────────────────────────────
 
+    async def _run_agent(self, agent, task: str, name: str) -> TaskResult:
+        """Run one agent alone, forwarding any token deltas it emits.
+
+        ``run_stream`` rather than ``run`` so that an advisor configured with
+        ``stream: true`` is streamed in phase A as well as phase B. For every
+        other advisor this is exactly ``run``: with ``model_client_stream``
+        off, no chunk events are ever produced and the loop simply collects the
+        final ``TaskResult``.
+        """
+        result: TaskResult | None = None
+        async for message in agent.run_stream(task=task):
+            if isinstance(message, TaskResult):
+                result = message
+            elif isinstance(message, ModelClientStreamingChunkEvent):
+                await self._publish_chunk(name, message.content)
+        if result is None:
+            raise RuntimeError(f"{name} produced no result")
+        return result
+
     async def _blind_round(self, question: str) -> dict[str, MagiTurn]:
         """Every advisor answers in parallel, in isolation."""
         task = prompts.blind_task(question)
@@ -125,7 +148,7 @@ class Magi:
                 span.set_attribute(ATTR_ADVISOR, persona.name)
                 span.set_attribute(ATTR_ROUND, 1)
                 try:
-                    result = await agent.run(task=task)
+                    result = await self._run_agent(agent, task, persona.name)
                 except Exception as exc:
                     # One unreachable model must not end the debate: the
                     # remaining advisors carry on and the verdict says so. That
@@ -186,6 +209,9 @@ class Magi:
             try:
                 async for message in team.run_stream(task=seed):
                     if isinstance(message, TaskResult):
+                        continue
+                    if isinstance(message, ModelClientStreamingChunkEvent):
+                        await self._publish_chunk(message.source.upper(), message.content)
                         continue
                     if isinstance(message, StructuredMessage) and isinstance(
                         message.content, MagiTurn
@@ -373,6 +399,16 @@ class Magi:
         return record
 
     # ── Helpers ──────────────────────────────────────────────────────────
+
+    async def _publish_chunk(self, name: str, text: str) -> None:
+        """One token delta from an advisor configured to stream.
+
+        Only ever fires for advisors with ``stream: true`` in the persona file,
+        so a node that streams nothing publishes nothing and the topic costs
+        exactly zero.
+        """
+        if self._bus is not None:
+            await self._bus.publish(TOPIC_CHUNK, {"advisor": name, "text": text})
 
     async def _publish_activity(self, name: str, busy: bool) -> None:
         """Who has an LLM call open, as it opens and closes.

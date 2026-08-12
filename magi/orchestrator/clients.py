@@ -22,13 +22,13 @@ from magi.constants import (
     ATTR_ADVISOR,
     ATTR_LENGTH_RETRY,
     ATTR_STREAMED,
+    DEFAULT_MAX_TOKENS,
     GEN_AI_OPERATION,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_SYSTEM,
     GEN_AI_USAGE_INPUT,
     GEN_AI_USAGE_OUTPUT,
     LENGTH_RETRY_FACTOR,
-    PROBE_MAX_TOKENS,
 )
 from magi.models import MagiTurn
 from magi.personas import Persona, PersonaSet
@@ -75,7 +75,7 @@ class InstrumentedChatClient(OpenAIChatCompletionClient):
         self._magi_counter = counter
         self._magi_activity = on_activity
         self._magi_model = kwargs.get("model", "unknown")
-        self._magi_max_tokens = kwargs.get("max_tokens") or PROBE_MAX_TOKENS
+        self._magi_max_tokens = kwargs.get("max_tokens") or DEFAULT_MAX_TOKENS
 
     async def _announce(self, busy: bool) -> None:
         """Tell the console this agent started or stopped generating.
@@ -132,9 +132,15 @@ class InstrumentedChatClient(OpenAIChatCompletionClient):
         on reasoning yields ``finish_reason="length"`` on the final result, by
         which point chunks have already been handed to the consumer and there is
         nothing to transparently retry. The condition is recorded and logged
-        loudly instead. This is the concrete reason not to stream MELCHIOR: the
-        retry is what stops one advisor's exhausted budget from taking the whole
-        group chat down with it.
+        loudly instead.
+
+        That is why ``stream`` is opt-in per advisor in ``config/magi.yaml``
+        rather than a global switch, and why pre-flight warns when an advisor
+        combines it with ``thinking``. A reasoning advisor is the one that
+        actually needs the retry, and the retry is what stops one exhausted
+        budget from taking the whole group chat down. The condition is a
+        property of the configuration, checkable at boot; it is deliberately not
+        a rule about any particular seat or model tag.
         """
         kwargs.setdefault("include_usage", True)
 
@@ -190,7 +196,7 @@ class InstrumentedChatClient(OpenAIChatCompletionClient):
                     # hitting the limit takes the whole debate down. One retry
                     # with double the room turns a fatal error into a slow turn.
                     widened = max(
-                        self._magi_max_tokens * LENGTH_RETRY_FACTOR, PROBE_MAX_TOKENS
+                        self._magi_max_tokens * LENGTH_RETRY_FACTOR, DEFAULT_MAX_TOKENS
                     )
                     logger.warning(
                         "%s spent its whole %d-token budget on reasoning — retrying at %d",
@@ -279,6 +285,11 @@ def build_advisor(
     the orchestrator has to ask for, it is the shape of every message. An
     advisor physically cannot answer without stating where it stands relative to
     the others.
+
+    ``model_client_stream`` comes from the persona, like every other per-advisor
+    behaviour here. Nothing in this module knows which seats or which model tags
+    can stream; it asks the configuration, and pre-flight is what checks the
+    configuration against the models that are actually serving.
     """
     return AssistantAgent(
         name=persona.name,
@@ -288,6 +299,7 @@ def build_advisor(
         system_message=personas.system_prompt_for(persona),
         description=f"{persona.name}, the {persona.archetype}.",
         output_content_type=MagiTurn,
+        model_client_stream=personas.stream_for(persona),
     )
 
 

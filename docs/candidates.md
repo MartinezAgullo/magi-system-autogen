@@ -115,6 +115,10 @@ Researched against AutoGen 0.7.5's installed source and **verified live** agains
 
 ### What is already done
 
+**Streaming itself is built, opt-in per advisor, and off by default.** `stream: true` on a persona in `config/magi.yaml` makes that advisor's `AssistantAgent` emit token deltas; both `scripts/ask.py` and the daemon render them to the terminal (`magi/services/stream_view.py`), so `./launch.sh` shows them too. Nothing in Python knows which seats or which model tags can stream: it asks the persona file, and pre-flight verifies the answer by probing those advisors through the streaming path rather than the plain one. Verified live with `gemma3:12b` and `qwen3:14b` streaming while `nemotron3:33b` did not.
+
+The one dangerous combination is checked as a property, not a name: an advisor with both `stream` and `thinking` on has lost the wider-budget retry, and is exactly the advisor that needs it. Pre-flight warns and lets the operator proceed.
+
 The **per-advisor activity indicator** is built and shipped, and it solves most of what streaming was wanted for. `TOPIC_ACTIVITY` carries `{advisor, busy}` from `InstrumentedChatClient` to the console, so each node shows GENERATING and pulses while it has a call open. Blind round: all three light at once and the one still lit after the others go quiet is the model gating the phase. Deliberation: one at a time under roundrobin, which also shows the turn order as it happens.
 
 That was the cheap fix for a console that previously showed nothing for 13-30 s of blind round and ~90 s of deliberation, which is exactly when an operator concludes the node has hung. Everything below is the expensive version.
@@ -178,13 +182,13 @@ Which confirms the mitigating detail: **`position` arrives first**, whole, befor
 
 ### Should the CLI do this? Yes, and before the web console
 
-`scripts/ask.py` is the developer's tool, it is where debates are watched most closely, and it currently prints nothing at all until the entire debate has finished. It is also the safest place to experiment, because it is not the operator-facing surface and a rendering bug there costs nothing.
+The renderer was first built into `scripts/ask.py` alone, which was a mistake worth recording: the node is started with `./launch.sh`, and a view that only existed in a developer script was invisible to anyone running the actual thing. It now lives in the package and both use it, gated on stdout being a terminal so it never streams into the journal under systemd.
 
 What is worth building, in order:
 
-1. **A per-advisor progress line**, driven by the activity events that already exist. No streaming, no parsing, no risk. `MELCHIOR ▸ generating… 18s` updated in place. This alone removes the "is it hung?" problem from the CLI, and it should be done first regardless of what happens to the rest.
-2. **Incremental `position` extraction.** Now unblocked (Finding 1 is fixed) and confirmed practical (Finding 4). About 40 lines of state machine over the accumulated buffer.
-3. **The `<think>` stream for the reasoning advisor** was going to be step 2 and is now **blocked** by Finding 2. It remains the highest information-per-line output available anywhere in the system, because it shows *why* the slowest advisor is slow, and it is unreachable until either AutoGen learns Ollama's field name or §5.3 lands. Worth revisiting if `OllamaChatCompletionClient` is ever adopted, since that is most of the case for adopting it.
+1. ~~**Incremental `position` extraction.**~~ **Done.** `PositionReader` in `magi/services/stream_view.py`. It is a three-state machine rather than a search over an accumulating buffer, because the deltas turn out to be far smaller than the key: `gemma3:12b` sends `'{'`, `'\n'`, `'  '`, `'"'`, `'position'`, `'":'`, so every boundary in `"position": "` can fall between two chunks. The first version searched for the key and assumed the value's opening quote was already in hand, which printed one stray space per advisor and stopped.
+2. **A per-advisor elapsed counter**, driven by the activity events. The renderer currently holds concurrent streams and prints them whole, because phase A runs three advisors at once and a plain terminal has one cursor; a header flip per token is unreadable. So the blind round is still 13-30 s of nothing, and an elapsed line per advisor would cover it without cursor gymnastics.
+3. **The `<think>` stream for the reasoning advisor** is **blocked** by Finding 2. It remains the highest information-per-line output available anywhere in the system, because it shows *why* the slowest advisor is slow, and it is unreachable until either AutoGen learns Ollama's field name or §5.3 lands. Worth revisiting if `OllamaChatCompletionClient` is ever adopted, since that is most of the case for adopting it.
 
 The one hard rule: **benchmark runs must not stream.** Streaming changes the request, changes how the client handles the response, adds per-chunk work on the node whose CPU is the object of study, and loses the length retry. If streaming ever ships it needs its own flag, defaulting off, recorded on the debate row next to `tracing_enabled` for the same reason that one is there. The `magi.streamed` span attribute is already in place.
 

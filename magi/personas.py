@@ -52,6 +52,17 @@ class Persona(BaseModel):
     # while gemma3 is measurably more reliable with it off. One global setting
     # cannot serve both.
     thinking: bool | None = None
+    # Tri-state for the same reason `thinking` is: whether an advisor can stream
+    # usefully is a property of its model and its backend, not of its seat, and
+    # the answer differs per advisor. Never infer it from a name or a tag in
+    # code — put it here, where pre-flight can then verify it against the model
+    # that is actually serving.
+    #
+    # Off unless asked for. Streaming loses the length retry (see
+    # `InstrumentedChatClient.create_stream`), and an advisor that silently lost
+    # its safety net because a default changed is the kind of thing that shows
+    # up as one inexplicable truncated debate a week later.
+    stream: bool | None = None
     options: ModelOptions | None = None
     system_prompt: str
 
@@ -161,6 +172,24 @@ class PersonaSet(BaseModel):
         if persona.thinking is not None:
             return persona.thinking
         return self.defaults.get("thinking")
+
+    def stream_for(self, persona: Persona) -> bool:
+        """Whether this advisor's model client streams its tokens.
+
+        Resolved to a concrete bool rather than left tri-state, because it feeds
+        ``AssistantAgent(model_client_stream=...)`` which takes no "leave it to
+        the model" option. Absent from both the persona and the defaults means
+        off: see the field's note on losing the length retry.
+        """
+        if persona.stream is not None:
+            return persona.stream
+        return bool(self.defaults.get("stream", False))
+
+    def streaming_names(self) -> list[str]:
+        """Advisors configured to stream. Used by pre-flight to decide which
+        ones need verifying through the streaming path rather than the plain
+        one, since the two do not fail in the same ways."""
+        return [p.name for p in self.magi if self.stream_for(p)]
 
     def options_for(self, persona: Persona) -> dict:
         """Defaults merged with per-persona overrides, persona winning."""

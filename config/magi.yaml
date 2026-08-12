@@ -29,9 +29,28 @@ version: 1
 # (2026-08-11), suppressing reasoning makes gemma3 measurably more reliable
 # (3/5 -> 5/5 valid) and makes nemotron3 produce nothing valid at all (0/5).
 # One switch cannot serve both, so it is set per advisor below.
+#
+# `stream` is off by default and set per advisor, for the same reason `thinking`
+# is: whether a model streams usefully depends on the model and the backend, not
+# on the seat. Turning it on makes that advisor's AssistantAgent emit token
+# chunks as they arrive.
+#
+# It is not free. A streamed call cannot be retried at a wider budget, because
+# by the time the model reports it ran out, chunks are already with the consumer
+# (see `InstrumentedChatClient.create_stream`). That retry is what stops one
+# advisor's exhausted budget from taking a whole group chat down, so an advisor
+# with `thinking: true` is exactly the one that should not stream. Pre-flight
+# warns about that combination, and verifies through the streaming path any
+# advisor that asks for it.
+#
+# It is also spelled out per advisor below even though this default already
+# covers it. A knob nobody can find is not configurable in practice, and the
+# whole reason `stream` is data rather than code is so it can be flipped per
+# seat without reading the source to discover it exists.
 defaults:
   temperature: 0.6
   max_tokens: 900
+  stream: false
 
 # Prepended to every persona's system prompt. Holds the rules of the debate;
 # the per-persona prompts hold only the personality.
@@ -69,6 +88,11 @@ magi:
     # mid-debate having emitted nothing. Its reasoning scales with the prompt,
     # so the budget has to be set for the largest prompt it will ever see.
     max_tokens: 4000
+    # Leave this false. Streaming removes the wider-budget retry, and this is
+    # the one advisor whose budget is genuinely at risk: how much it spends on
+    # reasoning varies with the question, and a truncated turn takes the whole
+    # group chat down. Pre-flight warns if you turn it on anyway.
+    stream: false
     system_prompt: |
       You are MELCHIOR, the scientist.
 
@@ -88,6 +112,9 @@ magi:
     temperature: 0.6
     # No reasoning phase: 3/5 valid with it on, 5/5 with it off, and faster.
     thinking: false
+    # Safe: no reasoning phase, so nothing here needs the retry that streaming
+    # gives up. Verified streaming cleanly on Ollama 0.23.2.
+    stream: true
     system_prompt: |
       You are BALTHASAR, the pragmatist.
 
@@ -107,6 +134,8 @@ magi:
     # Hybrid thinking. Pinned rather than left to the model's default, or the
     # same config produces different latencies on different days.
     thinking: false
+    # Safe, same as BALTHASAR. Verified streaming cleanly on Ollama 0.23.2.
+    stream: true
     system_prompt: |
       You are CASPAR, the skeptic.
 

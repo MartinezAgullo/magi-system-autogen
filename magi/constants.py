@@ -40,6 +40,10 @@ TOPIC_STT = "stt"                 # per-press recognition feedback (busy, empty,
 # fires when an advisor has finished; between those the console had nothing to
 # say and looked broken for as long as the system was working hardest.
 TOPIC_ACTIVITY = "activity"
+# Token deltas from advisors configured with `stream: true`. Silent for every
+# advisor that is not, which is all of them by default, so a node that does not
+# stream never publishes here at all.
+TOPIC_CHUNK = "chunk"
 
 # ── OpenTelemetry ────────────────────────────────────────────────────────────
 
@@ -151,7 +155,17 @@ PROBE_ATTEMPTS = 3
 # Thinking models spend their budget on reasoning before emitting anything. At
 # 300 tokens they return empty content and the reasoning in a separate field,
 # which reads as a decoding failure and is really a budget failure.
-PROBE_MAX_TOKENS = 900
+#: The completion budget assumed when nothing else supplies one. `config/magi.yaml`
+#: normally does, via `defaults.max_tokens` or a per-persona override, so this is
+#: only reached by a persona file that sets neither. It is a floor for code that
+#: must have a number, never a per-advisor policy: MELCHIOR's 4000 lives in the
+#: YAML because which advisor needs what is configuration, not a constant.
+DEFAULT_MAX_TOKENS = 900
+
+#: What pre-flight probes a bare model tag with. Advisors are probed at their own
+#: configured budget instead — the same model behaves differently at 900 and at
+#: 4000, so probing every tag at one number would test something nobody runs.
+PROBE_MAX_TOKENS = DEFAULT_MAX_TOKENS
 
 # Used only when probing a model that has no persona attached (scripts/). The
 # real pre-flight sends the advisor's own system prompt, because a thin prompt

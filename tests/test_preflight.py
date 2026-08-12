@@ -530,3 +530,127 @@ async def test_a_free_console_port_passes(settings, personas, patch_client):
     report = await ollama_check.run_preflight(settings, personas)
 
     assert "port" in _messages(report, "ok").lower()
+
+
+# ── Streaming ────────────────────────────────────────────────────────────────
+#
+# Whether an advisor streams is configuration, never a rule about a seat or a
+# model tag. What the code owes in return is verifying that configuration
+# against the model that is actually serving, because the streaming and
+# non-streaming paths do not fail in the same ways: structured output goes
+# through a stricter helper when streamed, and token usage is only reported if
+# it is asked for.
+
+
+def _streaming_personas(**overrides) -> PersonaSet:
+    advisor = {"name": "CASPAR", "model": "model-b:1b", "system_prompt": "b"}
+    advisor.update(overrides)
+    return PersonaSet.model_validate(
+        {
+            "magi": [
+                {"name": "MELCHIOR", "model": "model-a:1b", "system_prompt": "a"},
+                advisor,
+            ],
+            "orchestrator": {"name": "MAGI", "model": "model-a:1b", "system_prompt": "o"},
+        }
+    )
+
+
+def test_streaming_is_off_unless_asked_for():
+    """A default that quietly turned it on would remove the length retry from
+    every advisor at once, and the symptom is one truncated debate a week
+    later."""
+    personas = _streaming_personas()
+
+    assert personas.streaming_names() == []
+    assert personas.stream_for(personas.magi[1]) is False
+
+
+def test_a_persona_overrides_the_default_in_both_directions():
+    on = PersonaSet.model_validate(
+        {
+            "defaults": {"stream": True},
+            "magi": [
+                {"name": "MELCHIOR", "model": "a:1b", "system_prompt": "a",
+                 "stream": False},
+                {"name": "CASPAR", "model": "b:1b", "system_prompt": "b"},
+            ],
+            "orchestrator": {"name": "MAGI", "model": "a:1b", "system_prompt": "o"},
+        }
+    )
+
+    assert on.streaming_names() == ["CASPAR"]
+
+
+async def test_an_advisor_that_streams_is_probed_through_the_streaming_path():
+    """Verifying a streaming advisor without streaming has not verified it."""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        seen.append(body)
+        if not body.get("stream"):
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": VALID_TURN}}]}
+            )
+        chunks = "".join(
+            f'data: {{"choices":[{{"delta":{{"content":{json.dumps(c)}}}}}]}}\n\n'
+            for c in [VALID_TURN[:20], VALID_TURN[20:]]
+        )
+        return httpx.Response(200, text=chunks + "data: [DONE]\n\n")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ok_plain, _ = await ollama_check.probe_structured_output(
+            client, "http://fake/v1", "key", "m:1b", stream=False
+        )
+        ok_stream, detail = await ollama_check.probe_structured_output(
+            client, "http://fake/v1", "key", "m:1b", stream=True
+        )
+
+    assert ok_plain and ok_stream
+    assert "streamed" in detail
+    assert "stream" not in seen[0]
+    assert seen[1]["stream"] is True
+    # Without this a streamed probe reports no usage at all, so it would bless a
+    # configuration that then silently measures nothing.
+    assert seen[1]["stream_options"] == {"include_usage": True}
+
+
+async def test_a_stream_that_produces_no_chunks_fails_the_probe():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="data: [DONE]\n\n")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        ok, detail = await ollama_check.probe_structured_output(
+            client, "http://fake/v1", "key", "m:1b", stream=True
+        )
+
+    assert not ok
+    assert "no chunks" in detail
+
+
+def test_streaming_while_reasoning_warns_because_the_retry_is_gone():
+    """The one combination streaming makes dangerous, expressed over the
+    persona's settings rather than its name: a reasoning advisor is the one that
+    needs the wider-budget retry, and streaming is the one thing that removes
+    it."""
+    report = ollama_check.PreflightReport()
+
+    ollama_check._check_streaming_config(
+        report, _streaming_personas(stream=True, thinking=True)
+    )
+
+    warnings = [r for r in report.results if r.level == "warn"]
+    assert len(warnings) == 1
+    assert "CASPAR" in warnings[0].message
+    assert "cannot be retried" in warnings[0].message
+
+
+def test_streaming_without_reasoning_does_not_warn():
+    report = ollama_check.PreflightReport()
+
+    ollama_check._check_streaming_config(
+        report, _streaming_personas(stream=True, thinking=False)
+    )
+
+    assert [r for r in report.results if r.level == "warn"] == []

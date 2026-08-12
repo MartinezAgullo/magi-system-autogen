@@ -18,6 +18,7 @@ from magi.bus import Bus
 from magi.config import Settings
 from magi.constants import TOPIC_STATUS
 from magi.orchestrator import Magi
+from magi.services import stream_view
 from magi.services.draft import Draft
 from magi.services.stt import STTService, is_available
 from magi.services.telemetry import telemetry_service
@@ -109,6 +110,17 @@ async def run() -> None:
             tg.create_task(
                 supervise("ui", lambda: start_ui(bus, magi, personas, settings, stt, draft))
             )
+            # The terminal view of a debate, for whoever launched the node and is
+            # watching it. Two conditions, both necessary: at least one advisor
+            # asked to stream, and stdout is a terminal rather than the journal.
+            # Not supervised — a broken renderer must not restart the node, and
+            # losing the view costs nothing the console does not also show.
+            if personas.streaming_names() and stream_view.wanted():
+                logger.info(
+                    "Streaming to this terminal: %s",
+                    ", ".join(personas.streaming_names()),
+                )
+                tg.create_task(stream_view.render_stream(bus))
             if settings.telemetry_interval_s > 0:
                 tg.create_task(
                     supervise(
