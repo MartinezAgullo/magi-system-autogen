@@ -68,7 +68,7 @@ ATTR_ROUNDS_USED = "magi.rounds_used"
 ATTR_OUTCOME = "magi.outcome"
 ATTR_MODELS = "magi.models"
 ATTR_TRACING_ENABLED = "magi.tracing_enabled"
-# Which TerminationCondition fired: consensus, max_messages, timeout, external.
+# Which TerminationCondition fired — one of the TERMINATED_BY_* values below.
 # One query over this answers how often debates converge rather than run out.
 ATTR_TERMINATED_BY = "magi.terminated_by"
 ATTR_LLM_CALLS = "magi.llm_calls"
@@ -84,6 +84,30 @@ ATTR_LENGTH_RETRY = "magi.length_retry"
 # would trade a visible failure for an invisible latency cliff, on a node whose
 # whole point is that latency is measured.
 LENGTH_RETRY_FACTOR = 2
+
+# ── How a debate ended ───────────────────────────────────────────────────────
+#
+# The vocabulary of ATTR_TERMINATED_BY and DebateRecord.terminated_by. Fixed
+# strings rather than a config knob, and enumerated here rather than written
+# inline at the point of use, because they are the axis every cross-run query
+# groups by — including the sibling repo's, which must produce the same words
+# for the same events or the two benchmarks cannot be read side by side.
+#
+# TERMINATED_BY_BUDGET and TERMINATED_BY_TIMEOUT are deliberately distinct. Both
+# mean "did not converge", but one describes a debate with more to say and the
+# other one too slow to say it, and only the second is an argument for a faster
+# model.
+TERMINATED_BY_CONSENSUS = "consensus"
+TERMINATED_BY_BUDGET = "budget"
+TERMINATED_BY_TIMEOUT = "timeout"
+TERMINATED_BY_BARGE_IN = "barge_in"
+TERMINATED_BY_ERROR = "error"
+#: Fewer than two advisors survived the blind round, so there was nothing to
+#: deliberate: the group chat never ran at all.
+TERMINATED_BY_INSUFFICIENT = "insufficient_advisors"
+#: The stack fired but no latch claimed it — should not happen, and says so
+#: rather than silently reporting one of the real reasons.
+TERMINATED_BY_UNKNOWN = "unknown"
 
 # The call counter's bucket for SelectorGroupChat's turn-selection calls. Kept
 # apart from the orchestrator's own calls even though they share a model: the

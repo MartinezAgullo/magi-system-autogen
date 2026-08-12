@@ -54,6 +54,8 @@ from magi.constants import (
     SPAN_PHASE_VERDICT,
     SPAN_TALLY,
     SPAN_TURN,
+    TERMINATED_BY_ERROR,
+    TERMINATED_BY_INSUFFICIENT,
     TOPIC_QUESTION,
     TOPIC_TURN,
     TOPIC_VERDICT,
@@ -153,14 +155,14 @@ class Magi:
         present = [a for a in advisors if a.name in blind]
         if len(present) < 2:
             logger.warning("Fewer than two advisors answered — skipping deliberation")
-            return dict(blind), "insufficient_advisors", 1
+            return dict(blind), TERMINATED_BY_INSUFFICIENT, 1
 
         self._external = ExternalTermination()
-        condition, consensus = build_termination(
+        terminators = build_termination(
             self._settings, [a.name for a in present], self._external
         )
         team = build_team(
-            self._settings, self._personas, present, condition, self._counter
+            self._settings, self._personas, present, terminators.condition, self._counter
         )
 
         seed = prompts.deliberation_seed(
@@ -169,12 +171,12 @@ class Magi:
 
         turns = dict(blind)
         deliberation_turns = 0
-        # Sampled inside the loop, not after it. `OrTerminationCondition` resets
-        # every child once the run finishes, so a condition that fired reports
-        # `terminated == False` by the time run_stream returns — the first
-        # version of this recorded "budget" for a debate the log had just
-        # announced as a consensus.
-        stopped_by = "budget"
+        # Read from the latches after the run, never from `condition.terminated`
+        # and never by sampling during the stream. The group chat manager resets
+        # the whole stack the moment a condition fires, before this coroutine is
+        # scheduled again, so every condition reads False everywhere out here.
+        # `Latching` is what survives that; see termination.py.
+        stopped_by: str | None = None
 
         with get_tracer().start_as_current_span(SPAN_PHASE_DELIBERATION) as phase_span:
             try:
@@ -202,11 +204,6 @@ class Magi:
                             SPAN_TURN, {ATTR_ADVISOR: name, ATTR_ROUND: round_index}
                         )
                         await self._publish_turn(name, message.content, round_index)
-                    if stopped_by == "budget":
-                        if consensus.terminated:
-                            stopped_by = "consensus"
-                        elif self._external is not None and self._external.terminated:
-                            stopped_by = "barge_in"
             except Exception as exc:
                 # One advisor failing must not lose the debate. This is where
                 # the framework fights the 2/3 degradation requirement: in the
@@ -218,7 +215,13 @@ class Magi:
                 # cut short.
                 logger.exception("Deliberation failed — tallying the turns so far")
                 phase_span.record_exception(exc)
-                stopped_by = "error"
+                stopped_by = TERMINATED_BY_ERROR
+
+            # The exception path wins: a run that raised did not reach whatever
+            # the latches would report, and "budget" on a debate that crashed
+            # would hide a failure inside a normal-looking statistic.
+            if stopped_by is None:
+                stopped_by = terminators.fired()
 
             phase_span.set_attribute(ATTR_TERMINATED_BY, stopped_by)
             phase_span.set_attribute(ATTR_ROUND, deliberation_turns)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 from autogen_agentchat.base import TerminatedException, TerminationCondition
 from autogen_agentchat.conditions import (
@@ -25,6 +26,13 @@ from autogen_agentchat.messages import (
 )
 
 from magi.config import Settings
+from magi.constants import (
+    TERMINATED_BY_BARGE_IN,
+    TERMINATED_BY_BUDGET,
+    TERMINATED_BY_CONSENSUS,
+    TERMINATED_BY_TIMEOUT,
+    TERMINATED_BY_UNKNOWN,
+)
 from magi.models import MagiTurn
 from magi.orchestrator.consensus import tally
 
@@ -96,12 +104,90 @@ class ConsensusTermination(TerminationCondition):
         self._terminated = False
 
 
+class Latching(TerminationCondition):
+    """Delegates to one condition and remembers, past ``reset()``, that it fired.
+
+    Necessary because **a fired condition is not observable from outside the
+    run.** ``BaseGroupChatManager._apply_termination_condition`` calls
+    ``reset()`` on the whole stack the instant a child returns a
+    ``StopMessage``, and does so before the caller of ``run_stream`` is
+    scheduled. Measured on 0.7.5 with a stub team: every condition reports
+    ``terminated is False`` on every message the caller sees, including the
+    final ``TaskResult``. Sampling during the stream — the obvious fix, and the
+    one this code used to carry — never observes anything either. It is not a
+    race that a lucky ordering wins; the reset always gets there first.
+
+    ``TaskResult.stop_reason`` does survive, but only as the human-readable
+    *content* of the stop message, comma-joined when several fired at once.
+    Classifying a debate by substring-matching AutoGen's English would break on
+    a wording change in a patch release.
+
+    So the latch: set in ``__call__``, never cleared by ``reset()``. One
+    instance per debate, which is what makes "never cleared" safe.
+    """
+
+    def __init__(self, inner: TerminationCondition, label: str) -> None:
+        self._inner = inner
+        self._label = label
+        self._fired = False
+
+    @property
+    def label(self) -> str:
+        return self._label
+
+    @property
+    def fired(self) -> bool:
+        """Whether this condition ended the run. Survives the group chat's reset."""
+        return self._fired
+
+    @property
+    def terminated(self) -> bool:
+        return self._inner.terminated
+
+    async def __call__(
+        self, messages: Sequence[BaseAgentEvent | BaseChatMessage]
+    ) -> StopMessage | None:
+        stop = await self._inner(messages)
+        if stop is not None:
+            self._fired = True
+        return stop
+
+    async def reset(self) -> None:
+        # Deliberately does not clear `_fired`. That is the entire point.
+        await self._inner.reset()
+
+
+@dataclass
+class Terminators:
+    """The composed stop condition, plus the parts, for one debate.
+
+    ``consensus`` is exposed unwrapped because the orchestrator reads
+    ``latest_turns`` off it. The rest are only ever asked whether they fired.
+    """
+
+    condition: TerminationCondition
+    consensus: ConsensusTermination
+    #: In precedence order. Consensus first, because a debate that converged on
+    #: its very last permitted turn converged — reporting that as "budget"
+    #: would count a success as a failure in the one statistic the project
+    #: exists to produce. Barge-in next, since the operator's intent outranks
+    #: any budget the run happened to hit on the same turn.
+    latches: tuple[Latching, ...] = field(default_factory=tuple)
+
+    def fired(self) -> str:
+        """Why the debate stopped, as a ``TERMINATED_BY_*`` value."""
+        for latch in self.latches:
+            if latch.fired:
+                return latch.label
+        return TERMINATED_BY_UNKNOWN
+
+
 def build_termination(
     settings: Settings,
     advisor_names: Sequence[str],
     external: ExternalTermination,
-) -> tuple[TerminationCondition, ConsensusTermination]:
-    """The composed stop condition, and the consensus one for later inspection.
+) -> Terminators:
+    """The composed stop condition, and the means to ask afterwards what fired.
 
     The message budget counts **deliberation** turns only: phase A runs outside
     the team, so the group chat starts at round 2 and has ``max_rounds - 1``
@@ -118,10 +204,15 @@ def build_termination(
     max_messages = deliberation_rounds * len(advisor_names) + 1
 
     consensus = ConsensusTermination(advisor_names)
-    condition = (
-        consensus
-        | MaxMessageTermination(max_messages)
-        | TimeoutTermination(settings.debate_timeout_s)
-        | external
+    latches = (
+        Latching(consensus, TERMINATED_BY_CONSENSUS),
+        Latching(external, TERMINATED_BY_BARGE_IN),
+        Latching(TimeoutTermination(settings.debate_timeout_s), TERMINATED_BY_TIMEOUT),
+        Latching(MaxMessageTermination(max_messages), TERMINATED_BY_BUDGET),
     )
-    return condition, consensus
+
+    condition: TerminationCondition = latches[0]
+    for latch in latches[1:]:
+        condition = condition | latch
+
+    return Terminators(condition=condition, consensus=consensus, latches=latches)

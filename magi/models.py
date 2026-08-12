@@ -137,7 +137,11 @@ class DebateRecord(BaseModel):
     verdict: MagiVerdict
     turns: list[TurnRecord]
     rounds_used: int
-    #: ``consensus`` | ``budget`` | ``barge_in`` | ``insufficient_advisors``
+    #: A ``TERMINATED_BY_*`` value from ``constants``: ``consensus``,
+    #: ``budget``, ``timeout``, ``barge_in``, ``error`` or
+    #: ``insufficient_advisors``. ``budget`` and ``timeout`` are separate on
+    #: purpose — both are non-convergence, but only one of them is an argument
+    #: for a faster model.
     terminated_by: str
     #: True when the judge promoted a split vote by ruling the difference cosmetic.
     judged_cosmetic: bool = False

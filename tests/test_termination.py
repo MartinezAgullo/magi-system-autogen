@@ -7,6 +7,8 @@ never see all three advisors at once and would never fire.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from autogen_agentchat.base import TerminatedException
 from autogen_agentchat.messages import StructuredMessage, TextMessage
@@ -141,11 +143,11 @@ def test_budget_leaves_room_for_whole_rounds():
     from magi.orchestrator.termination import build_termination
 
     settings = Settings(max_rounds=3)
-    condition, _ = build_termination(settings, ADVISORS, ExternalTermination())
+    terminators = build_termination(settings, ADVISORS, ExternalTermination())
 
     # 1 blind round outside the team + 2 deliberation rounds of 3 turns,
     # plus the seed message the team is started with.
-    budget = _max_message_budget(condition)
+    budget = _max_message_budget(terminators.condition)
     assert budget == 2 * len(ADVISORS) + 1
 
 
@@ -155,11 +157,11 @@ def test_a_single_round_budget_still_allows_one_full_round():
     from magi.config import Settings
     from magi.orchestrator.termination import build_termination
 
-    condition, _ = build_termination(
+    terminators = build_termination(
         Settings(max_rounds=1), ADVISORS, ExternalTermination()
     )
 
-    assert _max_message_budget(condition) == len(ADVISORS) + 1
+    assert _max_message_budget(terminators.condition) == len(ADVISORS) + 1
 
 
 def _max_message_budget(condition) -> int:
@@ -172,4 +174,119 @@ def _max_message_budget(condition) -> int:
         if isinstance(node, MaxMessageTermination):
             return node._max_messages  # noqa: SLF001 — no public accessor
         stack.extend(getattr(node, "_conditions", []))
+        inner = getattr(node, "_inner", None)  # noqa: SLF001 — Latching wrapper
+        if inner is not None:
+            stack.append(inner)
     raise AssertionError("no MaxMessageTermination in the composed condition")
+
+
+# ── Which condition fired ────────────────────────────────────────────────────
+#
+# The behaviour under test is a framework one, and it is counter-intuitive
+# enough to be worth pinning: BaseGroupChatManager resets the whole termination
+# stack the instant a child fires, before the caller of run_stream is scheduled
+# again. So `condition.terminated` is False everywhere the orchestrator can look,
+# and the latch is the only surviving record of what happened.
+
+
+async def test_a_latch_survives_the_reset_that_follows_firing():
+    from magi.constants import TERMINATED_BY_CONSENSUS
+    from magi.orchestrator.termination import Latching
+
+    latch = Latching(ConsensusTermination(ADVISORS), TERMINATED_BY_CONSENSUS)
+
+    assert await latch(unanimous_batch()) is not None
+    assert latch.fired
+    assert latch.terminated
+
+    await latch.reset()
+
+    # The inner condition forgets, exactly as the group chat expects it to.
+    assert not latch.terminated
+    # The latch does not, which is the whole reason it exists.
+    assert latch.fired
+
+
+async def test_a_latch_that_never_fired_stays_clear():
+    from magi.constants import TERMINATED_BY_CONSENSUS
+    from magi.orchestrator.termination import Latching
+
+    latch = Latching(ConsensusTermination(ADVISORS), TERMINATED_BY_CONSENSUS)
+
+    assert await latch(unanimous_batch()[:2]) is None
+
+    assert not latch.fired
+
+
+async def test_timeout_is_reported_as_timeout_and_not_as_budget():
+    """The gap this whole mechanism was added to close. Both mean "did not
+    converge", but only one of them is an argument for a faster model."""
+    from autogen_agentchat.conditions import ExternalTermination
+
+    from magi.config import Settings
+    from magi.constants import TERMINATED_BY_TIMEOUT
+    from magi.orchestrator.termination import build_termination
+
+    terminators = build_termination(
+        Settings(debate_timeout_s=0.01), ADVISORS, ExternalTermination()
+    )
+
+    await asyncio.sleep(0.02)
+    assert await terminators.condition([msg("MELCHIOR", [])]) is not None
+    await terminators.condition.reset()
+
+    assert terminators.fired() == TERMINATED_BY_TIMEOUT
+
+
+async def test_consensus_outranks_a_budget_that_fired_on_the_same_turn():
+    """A debate that converged on its last permitted turn converged. Reporting
+    that as `budget` would count a success as a failure."""
+    from autogen_agentchat.conditions import ExternalTermination
+
+    from magi.config import Settings
+    from magi.constants import TERMINATED_BY_CONSENSUS
+    from magi.orchestrator.termination import build_termination
+
+    # max_rounds=1 -> a budget of len(ADVISORS) + 1 messages, exhausted by the
+    # same batch that completes the agreement. Note the fourth message keeps
+    # MELCHIOR's vote intact: a later turn replaces an earlier one, so an
+    # advisor that re-spoke with an empty `agrees_with` would break the tally
+    # rather than the budget.
+    terminators = build_termination(
+        Settings(max_rounds=1), ADVISORS, ExternalTermination()
+    )
+
+    stop = await terminators.condition(
+        unanimous_batch() + [msg("MELCHIOR", ["BALTHASAR", "CASPAR"])]
+    )
+
+    assert stop is not None
+    assert terminators.fired() == TERMINATED_BY_CONSENSUS
+
+
+async def test_barge_in_is_distinguishable_from_every_other_reason():
+    from autogen_agentchat.conditions import ExternalTermination
+
+    from magi.config import Settings
+    from magi.constants import TERMINATED_BY_BARGE_IN
+    from magi.orchestrator.termination import build_termination
+
+    external = ExternalTermination()
+    terminators = build_termination(Settings(), ADVISORS, external)
+
+    external.set()
+    assert await terminators.condition([msg("MELCHIOR", [])]) is not None
+
+    assert terminators.fired() == TERMINATED_BY_BARGE_IN
+
+
+def test_nothing_fired_is_not_silently_a_real_reason():
+    from autogen_agentchat.conditions import ExternalTermination
+
+    from magi.config import Settings
+    from magi.constants import TERMINATED_BY_UNKNOWN
+    from magi.orchestrator.termination import build_termination
+
+    terminators = build_termination(Settings(), ADVISORS, ExternalTermination())
+
+    assert terminators.fired() == TERMINATED_BY_UNKNOWN
