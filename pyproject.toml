@@ -57,6 +57,7 @@ voice = ["faster-whisper>=1.0", "piper-tts>=1.2"]
 [project.scripts]
 magi = "magi.main:main"
 magi-preflight = "magi.preflight:main"
+magi-config = "magi.config_help:main"
 
 [build-system]
 requires = ["hatchling"]

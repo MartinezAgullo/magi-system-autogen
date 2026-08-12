@@ -3,6 +3,11 @@
 #   ./launch.sh                 pre-flight checks, then run the daemon
 #   ./launch.sh --check-only    checks and exit (useful over ssh)
 #   ./launch.sh --skip-checks   straight to the daemon
+#   ./launch.sh --help          every setting, its value and where it came from
+#
+# --help delegates the configuration table to `magi.config_help`, which
+# generates it from Settings itself. A list written out here would be a second
+# copy of config.py, and the drift would be discovered on the Pi.
 #
 # Unlike latacc-edge's launcher, these checks CAN abort. That node was built to
 # survive every dependency being down; this one cannot hold a debate if a model
@@ -16,13 +21,28 @@ cd "$(dirname "$0")"
 
 CYAN='\033[0;36m'; GREEN='\033[0;32m'; DIM='\033[2m'; NC='\033[0m'
 
+usage() {
+    echo "Usage: ./launch.sh [--skip-checks|--check-only|--help]"
+    echo
+    echo "  (no flag)       pre-flight checks, then run the daemon"
+    echo "  --check-only    run the pre-flight checks and exit"
+    echo "  --skip-checks   start the daemon without checking anything"
+    echo "  --help          this, plus every configuration setting"
+}
+
 SKIP_CHECKS=0
 CHECK_ONLY=0
 case "${1:-}" in
     --skip-checks) SKIP_CHECKS=1 ;;
     --check-only)  CHECK_ONLY=1 ;;
     "")            ;;
-    *) echo "Usage: ./launch.sh [--skip-checks|--check-only]"; exit 1 ;;
+    -h|--help)
+        usage
+        echo
+        uv run python -m magi.config_help
+        exit 0
+        ;;
+    *) usage >&2; exit 1 ;;
 esac
 
 if [[ "$SKIP_CHECKS" != "1" ]]; then
