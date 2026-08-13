@@ -136,6 +136,22 @@ class TurnRecord(BaseModel):
     tallied: bool = False
 
 
+class Echo(BaseModel):
+    """Two advisors whose tallied positions are largely the same text.
+
+    Not an error and not an outcome: a fact about how the consensus was
+    produced. Three advisors that agree because two of them stopped writing
+    carry exactly as much information as one, and the tally scores it as the
+    strongest possible agreement.
+    """
+
+    #: The pair, sorted, so the same echo reads the same way in every row.
+    advisors: list[str]
+    #: How much of the shorter position appears in the longer one, 0.0 to 1.0.
+    #: 1.0 is verbatim.
+    containment: float
+
+
 class NodeCost(BaseModel):
     """What one debate cost the node it ran on, as opposed to the inference host.
 
@@ -212,6 +228,19 @@ class DebateRecord(BaseModel):
     #: and the turn order hid it, that one says a whole split vote was wording.
     #: An UNANIMOUS with both at zero is the only one nobody helped.
     judged_edges: int = 0
+    #: How much of the tallied positions is each advisor's own text: 1.0 when no
+    #: two of them share a phrase, 0.0 when at least two are word for word the
+    #: same. ``None`` when fewer than two advisors were tallied and there is
+    #: nothing to compare.
+    #:
+    #: This is the second axis of cheap consensus, and the one nothing else
+    #: records. ``judged_cosmetic`` and ``judged_edges`` say the judge granted
+    #: the agreement; this says the advisors stopped contributing. A debate can
+    #: be unaided on both counts and still be an echo, so an UNANIMOUS is only
+    #: earned when the judge stayed out of it *and* this stayed high.
+    novelty: float | None = None
+    #: The pairs that carried it down, worst first. Empty on a healthy debate.
+    echoes: list[Echo] = Field(default_factory=list)
     #: The round the outcome was decided on: the deepest one in which every
     #: advisor spoke. Lower than ``rounds_used`` when the last round was cut off
     #: by the budget, the clock or a crash, and lower again under a selector

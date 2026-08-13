@@ -92,6 +92,11 @@ ATTR_JUDGED_COSMETIC = "magi.judged_cosmetic"
 #: Agreement the advisors declared and agreement a judge granted have to stay
 #: distinguishable, or a rise in UNANIMOUS cannot be attributed to either.
 ATTR_JUDGED_EDGES = "magi.judged_edges"
+#: How much of the tallied positions was each advisor's own text. Agreement the
+#: advisors declared, agreement a judge granted and agreement produced by one
+#: advisor copying another are three different things, and only the first is
+#: worth what a debate costs.
+ATTR_NOVELTY = "magi.novelty"
 #: The round the outcome was decided on, which is the deepest one where every
 #: advisor had spoken. Lower than `rounds_used` whenever the last round was cut
 #: short, and systematically lower under a selector that asks unevenly. Two rows
@@ -152,6 +157,29 @@ SELECTOR_LABEL = "SELECTOR"
 # their actual persona prompts, so this threshold rejects the degenerate case
 # without being anywhere near the working range.
 MIN_POSITION_CHARS = 40
+
+# ── Novelty ──────────────────────────────────────────────────────────────────
+#
+# Mode collapse is the failure the tally cannot see: an advisor stops
+# contributing and reproduces the previous speaker, and three identical answers
+# score as an unusually strong consensus. Measured on 2026-08-13 in a real
+# UNANIMOUS the judge never touched — MELCHIOR's and BALTHASAR's final positions
+# were the same 225 characters, byte for byte.
+#
+# Both values are part of the shared contract: the sibling repo has to compute
+# the same number from the same text, or the two convergence rates are not
+# describing the same thing.
+
+#: Words per shingle. Four is long enough that ordinary shared phrasing ("a
+#: three-person startup should avoid") does not register as copying, and short
+#: enough to catch a sentence lifted and lightly edited.
+NOVELTY_SHINGLE = 4
+
+#: How much of the shorter position has to appear in the longer one before the
+#: pair is called an echo. Containment rather than similarity, because the
+#: common shape is one advisor's text embedded whole in another's with a
+#: sentence added, which a symmetric measure would dilute to nothing.
+ECHO_CONTAINMENT = 0.5
 
 # How many times pre-flight will ask an advisor before declaring it unusable.
 #
