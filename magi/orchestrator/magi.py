@@ -44,6 +44,7 @@ from magi.constants import (
     ATTR_JUDGED_EDGES,
     ATTR_LLM_CALLS,
     ATTR_MODELS,
+    ATTR_NOVELTY,
     ATTR_OUTCOME,
     ATTR_ROUND,
     ATTR_ROUNDS_USED,
@@ -82,6 +83,7 @@ from magi.orchestrator.consensus import (
     tally,
 )
 from magi.orchestrator.judge import judge_disagreement, judge_pairs
+from magi.orchestrator.novelty import measure as measure_novelty
 from magi.orchestrator.teams import build_team
 from magi.orchestrator.termination import build_termination
 from magi.personas import PersonaSet
@@ -505,6 +507,25 @@ class Magi:
                     result = Tally(Outcome.UNANIMOUS, tuple(sorted(turns)), ())
                     judged_cosmetic = True
 
+            # The other axis of cheap agreement, and the one the judge fields
+            # say nothing about: whether the advisors wrote three answers or
+            # copied one. Free — no model call, pure text — so it is measured on
+            # every debate rather than only when someone suspects it.
+            novelty = measure_novelty(
+                {name: turn.position for name, turn in turns.items()}
+            )
+            if novelty.echoed:
+                logger.warning(
+                    "[%s] %s reached on repeated text: %s. Three identical "
+                    "answers carry as much information as one",
+                    debate_id, result.outcome.value,
+                    "; ".join(
+                        f"{a}≡{b} ({echo.containment:.0%})"
+                        for echo in novelty.echoes
+                        for a, b in [echo.advisors]
+                    ),
+                )
+
             verdict = await self._verdict(question, turns, result)
             elapsed = time.monotonic() - started
 
@@ -513,6 +534,10 @@ class Magi:
             root.set_attribute(ATTR_TERMINATED_BY, terminated_by)
             root.set_attribute(ATTR_JUDGED_COSMETIC, judged_cosmetic)
             root.set_attribute(ATTR_JUDGED_EDGES, len(repaired))
+            if novelty.score is not None:
+                # A number, not a transcript: safe on a span, and it makes
+                # "show me the debates that agreed by copying" one query.
+                root.set_attribute(ATTR_NOVELTY, novelty.score)
             root.set_attribute(ATTR_TALLIED_ROUND, deliberation.tallied_round)
             root.set_attribute(ATTR_ADVISORS_PRESENT, sorted(turns))
             root.set_attribute(ATTR_LLM_CALLS, self._counter.total.calls)
@@ -536,6 +561,8 @@ class Magi:
                 terminated_by=terminated_by,
                 judged_cosmetic=judged_cosmetic,
                 judged_edges=len(repaired),
+                novelty=novelty.score,
+                echoes=list(novelty.echoes),
                 tallied_round=deliberation.tallied_round,
                 advisors_present=sorted(turns),
                 models={p.name: p.model for p in self._personas.magi},

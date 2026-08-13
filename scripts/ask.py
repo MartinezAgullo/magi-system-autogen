@@ -126,6 +126,13 @@ async def main() -> int:
               f"agreement claim(s)){NC}")
     if record.judged_cosmetic:
         print(f"  {DIM}(the judge ruled the disagreement cosmetic){NC}")
+    # The third way an outcome gets help, and the only one nobody granted: an
+    # advisor stopped contributing and repeated the previous speaker. Printed
+    # loudly, because it is the one an operator reading three agreeing summaries
+    # will otherwise take for an unusually strong consensus.
+    for echo in record.echoes:
+        print(f"  {RED}(echo){NC} {' and '.join(echo.advisors)} tallied "
+              f"{echo.containment:.0%} the same text")
     print(f"\n{record.verdict.answer}\n")
     if record.verdict.dissent:
         print(f"{YELLOW}Dissent:{NC} {record.verdict.dissent}")

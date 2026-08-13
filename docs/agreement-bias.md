@@ -2,6 +2,8 @@
 
 How to tune MAGI's bias towards consensus and, more importantly, which of the available knobs produce agreement you can defend and which only produce agreement you can report.
 
+> **First measurement, the same evening, and it is not good news.** Three `autogen_roundrobin` debates against the Spark after the change: all three UNANIMOUS, the judge invoked in none of them, and two of them reached it on **copied text** — one pair identical in the first, all three final positions identical byte for byte in the second, from a blind round that had produced three genuinely different answers including a flat "No". The levers below moved the system off uniform DEADLOCK, which is what they were for; what they moved it to is not yet convergence. See [Where this now stands](#where-this-now-stands) at the end. Do not apply (a) on this evidence — the problem is no longer that the arithmetic is too strict.
+
 **Status, 2026-08-13: (b), (d), (f) and (g) are applied. (a), (c) and (e) are not**, and each lever below says which it is. The original configuration was deliberately biased the *other* way, towards earned disagreement, and every debate run against it ended in DEADLOCK. That is the reason for the change: not that disagreement is bad, but that a system which cannot express the other two outcomes is not reporting a result, it is reporting its own prompt. This document exists because "make them agree more" is a reasonable thing to want from a deliberation system, and because the obvious way to do it is the wrong one.
 
 > **A note on the sibling repo.** Two of the levers below (the tally rule and the judge) sit in files held by contract with `magi-system`. Changing them here alone silently stops the benchmark from being a comparison. See [Relationship to sibling projects](../CLAUDE.md#relationship-to-sibling-projects).
@@ -184,7 +186,23 @@ Only if debates still deadlock uniformly after that, move to (a). It is the larg
 Whatever you change, the question is not "did `UNANIMOUS` go up". It is whether the debates still produce information. Three checks:
 
 1. **Contested questions must still reach MAJORITY and DEADLOCK.** A configuration that reaches `UNANIMOUS` on a genuinely contested question has broken, not improved. Keep a fixed set of such questions and re-run them.
-2. **Read the positions for novelty.** Mode collapse is visible to the eye and invisible to the tally: if the three `position` fields in the final round share sentences, the consensus is an echo. This is what the `position` novelty requirement in `deliberation_seed()` exists to prevent.
+2. **Read the positions for novelty.** Mode collapse is visible to the eye and invisible to the tally: if the three `position` fields in the final round share sentences, the consensus is an echo. This is what the `position` novelty requirement in `deliberation_seed()` exists to prevent. **This is now measured rather than read**, by `magi/orchestrator/novelty.py`: every debate carries a `novelty` score and the list of advisor pairs whose tallied positions are the same text. It measures text reuse and nothing else, so three advisors reaching one conclusion in three sets of words score near 1.0, which is the behaviour to keep — the check is for the collapse, not for the agreement.
 3. **Split `judged_cosmetic` out of the `UNANIMOUS` rate.** They answer different questions and averaging them hides which lever moved.
 
 `DebateRecord` carries `terminated_by`, `judged_cosmetic`, `judged_edges`, `rounds_used`, `tallied_round` and `outcome`, which is enough for all three without adding instrumentation. Every debate is now written to SQLite by `store/debates.py`, and `scripts/report.py` answers checks 1 and 3 directly: it splits the `UNANIMOUS` rate into the outcomes the advisors reached unaided, the ones where the judge repaired a one-sided claim, and the ones it promoted wholesale, grouped by engine. Check 2 is still a human reading positions, but the positions are there to read: the store keeps every turn of every round, not one per advisor, with the ones the tally actually counted marked.
+
+## Where this now stands
+
+Written after the first debates held against the Spark with the record in place, on 2026-08-13. Three `autogen_roundrobin` runs and one `autogen_selector` run, so this is a direction rather than a result — but the direction is clear enough to change what to do next.
+
+Every run reached `UNANIMOUS`. The judge was invoked in one of the four, and promoted it. The other three the advisors reached on their own, which by the metrics that existed that morning is the best possible outcome. Two of those three were echoes: in one, two advisors' final positions were the same text; in the other, all three were, character for character, after a blind round that had produced three different answers, one of which argued the opposite case.
+
+That is the failure this document names in the first section as **agreement inflation**, arriving through a door nobody was watching. The levers applied were all about how agreement is *reported*: the judge's threshold, the vote bar, the wording of the seed. None of them touched what stops an advisor from copying, and the seed's ordering rule — critique first, then a position containing something nobody else said — is evidently not holding under the relaxed premise. Softening "you are expected to disagree" appears to have taken the pressure off the novelty requirement along with everything else.
+
+Three consequences:
+
+**(a) is off the table for now.** It was queued as the next lever if debates still deadlocked uniformly. They do not deadlock at all. Loosening the tally rule on this evidence would add a fourth way to reach a consensus nobody earned.
+
+**The next change belongs in the seed, not in the arithmetic.** The novelty requirement is currently a sentence in `deliberation_seed()` competing with a premise that now says the goal is a conclusion all three can stand behind. Making it structural — an advisor may not restate another's position, and must say what it is adding — is the obvious first attempt, and it is now cheap to evaluate because the effect is a number on every row rather than something someone has to notice.
+
+**The measurement is the deliverable here, not the fix.** `novelty` and `echoes` are on every debate from now on, and `scripts/report.py` prints the rate under the convergence table. Whatever is tried next, the question is no longer "did `UNANIMOUS` go up" but "did it go up in the column where the advisors did the work", and there are now three separate columns saying who did.

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from magi.models import Outcome
+from magi.models import Echo, Outcome
 from magi.store.debates import DebateStore, connect
 from tests.test_store import ADVISORS, a_record
 
@@ -138,6 +138,59 @@ async def test_excluded_rows_are_counted_and_named(tmp_path):
     assert "1 lost an advisor" in printed
     # And --all keeps them.
     assert "excluded" not in report.cost(rows, keep_all=True)
+
+
+async def test_an_echoed_unanimous_is_named_under_the_convergence_table(tmp_path):
+    """`unaided` says the judge did not intervene. It does not say the debate
+    was worth holding: an advisor that repeated the previous speaker produces
+    the same column entry as three advisors that genuinely converged. The two
+    concessions are independent, so the report shows both or it shows a number
+    that hides one of them."""
+    store = DebateStore(tmp_path / "magi.db")
+    await store.save(a_record(
+        debate_id="echoed000000", outcome=Outcome.UNANIMOUS,
+        judged_cosmetic=False, judged_edges=0,
+        novelty=0.0, echoes=[Echo(advisors=["BALTHASAR", "MELCHIOR"],
+                                  containment=1.0)],
+    ))
+    await store.save(a_record(
+        debate_id="genuine00000", outcome=Outcome.UNANIMOUS,
+        judged_cosmetic=False, judged_edges=0, novelty=0.97, echoes=[],
+    ))
+    with connect(store.path) as conn:
+        rows = conn.execute("SELECT * FROM debates ORDER BY debate_id").fetchall()
+
+    printed = report.convergence(rows, keep_all=False)
+
+    # Both count as unaided, because neither was judged. That is exactly why
+    # the novelty line has to sit underneath saying one of them was an echo.
+    assert report.unanimous_split(rows) == (2, 0, 0)
+    assert "1 of 2 agreed by repeating text" in printed
+    assert "BALTHASAR≡MELCHIOR" in printed
+
+
+async def test_a_clean_batch_says_so_rather_than_staying_silent(tmp_path):
+    """The absence of a line reads as "not measured", which is a different fact
+    from "measured, nothing repeated" — the same distinction the NULL columns
+    make everywhere else in the record."""
+    store = DebateStore(tmp_path / "magi.db")
+    await store.save(a_record(debate_id="genuine00000", novelty=0.95, echoes=[]))
+    with connect(store.path) as conn:
+        rows = conn.execute("SELECT * FROM debates").fetchall()
+
+    assert "no debate repeated another advisor's text" in report.novelty_line(rows)
+
+
+async def test_rows_recorded_before_the_measure_existed_read_as_unmeasured(tmp_path):
+    """A debate with fewer than two tallied positions has nothing to compare,
+    and so does a row from a database nobody migrated. Neither is a novelty of
+    zero, and neither may be averaged as one."""
+    store = DebateStore(tmp_path / "magi.db")
+    await store.save(a_record(debate_id="unmeasured00", novelty=None, echoes=[]))
+    with connect(store.path) as conn:
+        rows = conn.execute("SELECT * FROM debates").fetchall()
+
+    assert "not measured" in report.novelty_line(rows)
 
 
 async def test_a_mixed_roster_is_reported_rather_than_filtered(tmp_path):

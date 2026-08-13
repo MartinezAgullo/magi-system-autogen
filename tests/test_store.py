@@ -26,6 +26,7 @@ from magi.constants import TERMINATED_BY_BUDGET, TERMINATED_BY_CONSENSUS
 from magi.models import (
     Critique,
     DebateRecord,
+    Echo,
     MagiTurn,
     MagiVerdict,
     NodeCost,
@@ -78,6 +79,8 @@ def a_record(**overrides) -> DebateRecord:
         terminated_by=TERMINATED_BY_BUDGET,
         judged_cosmetic=False,
         judged_edges=1,
+        novelty=0.25,
+        echoes=[Echo(advisors=["BALTHASAR", "CASPAR"], containment=0.75)],
         tallied_round=2,
         advisors_present=sorted(ADVISORS),
         models={"MELCHIOR": "nemotron3:33b", "BALTHASAR": "gemma3:12b",
@@ -133,6 +136,35 @@ async def test_opening_an_existing_database_twice_changes_nothing(tmp_path):
         assert conn.execute("SELECT count(*) FROM debates").fetchone()[0] == 1
 
 
+async def test_an_older_database_is_migrated_rather_than_discarded(tmp_path):
+    """The rows in it are debates that cost minutes of three models' time under
+    a configuration that has probably moved since. Deleting the file on a schema
+    bump would be simpler and would throw away exactly what this module exists
+    to keep.
+
+    v1 -> v2 also backfills the novelty columns from the stored transcripts,
+    which is the argument for keeping transcripts, demonstrated: the measure did
+    not exist when those debates ran and the old runs can still answer it."""
+    path = tmp_path / "magi.db"
+    await DebateStore(path).save(a_record(debate_id="fromversion1"))
+    # Rewind to v1: drop the columns v2 added and reset the stamp.
+    with connect(path) as conn:
+        conn.execute("ALTER TABLE debates DROP COLUMN novelty")
+        conn.execute("ALTER TABLE debates DROP COLUMN echoes")
+        conn.execute("PRAGMA user_version = 1")
+
+    DebateStore(path).initialise()
+
+    with connect(path) as conn:
+        row = conn.execute("SELECT * FROM debates").fetchone()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    assert row["debate_id"] == "fromversion1"
+    # a_record()'s three tallied positions differ only by advisor name, so this
+    # backfills as a near-echo rather than as a clean debate. What matters is
+    # that it was computed at all, from evidence recorded before the measure.
+    assert row["novelty"] is not None
+
+
 async def test_a_database_from_a_future_schema_is_refused_rather_than_half_read(
     tmp_path,
 ):
@@ -182,6 +214,8 @@ async def test_a_full_record_survives_the_round_trip(tmp_path):
     assert row["verdict_dissent"].startswith("CASPAR")
     # DEADLOCK-only, and the round trip must not invent one.
     assert row["verdict_split_on"] is None
+    assert row["novelty"] == pytest.approx(0.25)
+    assert json.loads(row["echoes"])[0]["advisors"] == ["BALTHASAR", "CASPAR"]
 
 
 async def test_the_whole_transcript_is_kept_and_the_tallied_row_is_marked(tmp_path):

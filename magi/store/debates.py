@@ -56,7 +56,10 @@ logger = logging.getLogger(__name__)
 #: database written at a version this code does not know is refused rather than
 #: half-read, because a silently ignored column is a benchmark that reports the
 #: wrong thing rather than failing.
-SCHEMA_VERSION = 1
+#:
+#: v2 added `novelty` and `echoes`: whether the advisors wrote three answers or
+#: copied one. See `orchestrator/novelty.py`.
+SCHEMA_VERSION = 2
 
 #: How long a write waits for another writer before giving up. Generous, because
 #: the alternative to waiting is losing a debate that took three minutes to
@@ -101,6 +104,8 @@ _SCHEMA = (
         max_rounds         INTEGER NOT NULL,
         judged_cosmetic    INTEGER NOT NULL,
         judged_edges       INTEGER NOT NULL,
+        novelty            REAL,
+        echoes             TEXT,
         advisors_present   TEXT    NOT NULL,
         models             TEXT    NOT NULL,
         streamed_advisors  TEXT    NOT NULL,
@@ -169,24 +174,33 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS idx_preflight_node ON preflight_runs(node_id, ran_at)",
 )
 
-_INSERT_DEBATE = """
-    INSERT OR REPLACE INTO debates VALUES (
-        :debate_id, :schema_version, :node_id, :started_at, :question, :engine,
-        :outcome, :terminated_by, :rounds_used, :tallied_round, :max_rounds,
-        :judged_cosmetic, :judged_edges, :advisors_present, :models,
-        :streamed_advisors, :tracing_enabled, :residency_warning, :duration_s,
-        :llm_calls, :selector_calls, :prompt_tokens, :completion_tokens,
-        :cpu_s, :cpu_percent, :peak_rss_mb, :mean_rss_mb, :cost_samples,
-        :verdict_answer, :verdict_dissent, :verdict_split_on
-    )
-"""
+# Columns named rather than positional. A bare `VALUES (...)` is one reordered
+# column away from writing the engine into the outcome, and the whole file is a
+# contract two repositories edit independently.
+_DEBATE_COLUMNS = (
+    "debate_id", "schema_version", "node_id", "started_at", "question", "engine",
+    "outcome", "terminated_by", "rounds_used", "tallied_round", "max_rounds",
+    "judged_cosmetic", "judged_edges", "novelty", "echoes", "advisors_present",
+    "models", "streamed_advisors", "tracing_enabled", "residency_warning",
+    "duration_s", "llm_calls", "selector_calls", "prompt_tokens",
+    "completion_tokens", "cpu_s", "cpu_percent", "peak_rss_mb", "mean_rss_mb",
+    "cost_samples", "verdict_answer", "verdict_dissent", "verdict_split_on",
+)
 
-_INSERT_TURN = """
-    INSERT INTO turns VALUES (
-        :debate_id, :seq, :advisor, :round_index, :tallied, :position,
-        :summary, :agrees_with, :confidence, :critique
-    )
-"""
+_TURN_COLUMNS = (
+    "debate_id", "seq", "advisor", "round_index", "tallied", "position",
+    "summary", "agrees_with", "confidence", "critique",
+)
+
+
+def _insert(table: str, columns: tuple[str, ...]) -> str:
+    names = ", ".join(columns)
+    placeholders = ", ".join(f":{column}" for column in columns)
+    return f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({placeholders})"
+
+
+_INSERT_DEBATE = _insert("debates", _DEBATE_COLUMNS)
+_INSERT_TURN = _insert("turns", _TURN_COLUMNS)
 
 
 @dataclass(frozen=True)
@@ -262,9 +276,13 @@ class DebateStore:
                 )
                 logger.info("Created benchmark database at %s (v%d)",
                             self._path, SCHEMA_VERSION)
-            elif version != SCHEMA_VERSION:
-                # No migration path exists at v1 because there is nothing to
-                # migrate from. The first version that needs one brings it.
+            elif version < SCHEMA_VERSION:
+                _migrate(conn, version)
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            elif version > SCHEMA_VERSION:
+                # Forwards only. A file from a newer version may contain columns
+                # this code would silently ignore, and a benchmark that quietly
+                # reports the wrong thing is worse than one that refuses to run.
                 raise IncompatibleSchema(
                     f"{self._path} was written at schema v{version}, this code "
                     f"speaks v{SCHEMA_VERSION}. The schema is a shared contract "
@@ -414,6 +432,46 @@ class DebateStore:
             conn.close()
 
 
+def _migrate(conn: sqlite3.Connection, version: int) -> None:
+    """Bring an older database up to :data:`SCHEMA_VERSION`, in place.
+
+    Deleting the file and starting again would be simpler and is the wrong
+    trade: the rows in it are debates that took minutes of three models' time
+    under a configuration that has probably moved since. That is the same
+    reasoning that made this module exist.
+
+    **v1 -> v2** adds the novelty columns, and backfills them from the stored
+    transcripts. That backfill is the argument for keeping the transcript in the
+    first place, demonstrated: the measure did not exist when those debates ran,
+    the evidence was kept anyway, and the old runs can answer the new question
+    without being repeated.
+    """
+    if version < 2:  # noqa: PLR2004 — the version this step produces
+        from magi.orchestrator.novelty import measure
+
+        conn.execute("ALTER TABLE debates ADD COLUMN novelty REAL")
+        conn.execute("ALTER TABLE debates ADD COLUMN echoes TEXT")
+        for row in conn.execute("SELECT debate_id FROM debates").fetchall():
+            positions = {
+                turn["advisor"]: turn["position"]
+                for turn in conn.execute(
+                    "SELECT advisor, position FROM turns "
+                    "WHERE debate_id = ? AND tallied ORDER BY seq",
+                    (row["debate_id"],),
+                )
+            }
+            result = measure(positions)
+            conn.execute(
+                "UPDATE debates SET novelty = ?, echoes = ? WHERE debate_id = ?",
+                (
+                    result.score,
+                    json.dumps([echo.model_dump() for echo in result.echoes]),
+                    row["debate_id"],
+                ),
+            )
+        logger.info("Migrated %s to schema v2 (novelty backfilled)", conn)
+
+
 def _iso(moment: datetime) -> str:
     """UTC, with the offset spelled out, to the millisecond.
 
@@ -442,6 +500,10 @@ def _debate_row(record: DebateRecord) -> dict:
         "max_rounds": record.max_rounds,
         "judged_cosmetic": int(record.judged_cosmetic),
         "judged_edges": record.judged_edges,
+        # NULL when fewer than two advisors were tallied: there was nothing to
+        # compare, which is not the same as nothing being repeated.
+        "novelty": record.novelty,
+        "echoes": json.dumps([echo.model_dump() for echo in record.echoes]),
         "advisors_present": json.dumps(record.advisors_present),
         "models": json.dumps(record.models),
         "streamed_advisors": json.dumps(record.streamed_advisors),

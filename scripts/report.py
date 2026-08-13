@@ -189,6 +189,36 @@ def unanimous_split(rows: Sequence[sqlite3.Row]) -> tuple[int, int, int]:
     return len(unanimous) - promoted - repaired, repaired, promoted
 
 
+def novelty_line(rows: Sequence[sqlite3.Row]) -> str:
+    """How many of these debates agreed by repeating each other's text.
+
+    A footer under the convergence table rather than another column, because it
+    qualifies the whole block: `unaided` means the judge did not intervene, and
+    an echoed debate is one where it did not need to. Both concessions produce
+    an UNANIMOUS nobody earned, and they are independent, so a rate that hid
+    either one would be the same number the levers were changed to stop
+    producing.
+    """
+    scored = [row for row in rows if row["novelty"] is not None]
+    if not scored:
+        return f"  {DIM}novelty      not measured on these rows{NC}"
+
+    echoed = [row for row in scored if json.loads(row["echoes"] or "[]")]
+    average = mean([row["novelty"] for row in scored])
+    if not echoed:
+        return (f"  {DIM}novelty      mean {average:.2f} · no debate repeated "
+                f"another advisor's text{NC}")
+
+    pairs = sorted({
+        "≡".join(echo["advisors"])
+        for row in echoed
+        for echo in json.loads(row["echoes"])
+    })
+    return (f"  {DIM}novelty      mean {average:.2f} · {NC}{YELLOW}"
+            f"{len(echoed)} of {len(scored)} agreed by repeating text{NC}"
+            f" {DIM}({', '.join(pairs)}){NC}")
+
+
 def convergence(rows: Sequence[sqlite3.Row], keep_all: bool) -> str:
     """Did they agree, and did they need help agreeing."""
     usable = rows if keep_all else [r for r in rows if convergence_excuse(r) is None]
@@ -225,6 +255,7 @@ def convergence(rows: Sequence[sqlite3.Row], keep_all: bool) -> str:
     # evidence as one that used the whole of it, whatever its outcome says.
     full = sum(row["tallied_round"] >= row["rounds_used"] for row in usable)
     out.append(f"  {DIM}tallied at the deepest round on {full} of {len(usable)}{NC}")
+    out.append(novelty_line(usable))
     if not keep_all:
         out.append(excuses(rows, convergence_excuse))
     return "\n".join(out)
