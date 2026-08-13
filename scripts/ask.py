@@ -17,6 +17,7 @@ import sys
 from magi import personas as personas_mod
 from magi.bus import Bus
 from magi.config import Settings
+from magi.constants import TERMINATED_BY_CONSENSUS
 from magi.models import Outcome
 from magi.orchestrator import Magi
 from magi.services.metrics import process_stats
@@ -69,8 +70,15 @@ async def main() -> int:
         shutdown_tracing()
 
     colour = COLOURS[record.outcome]
+    # Only worth the words when turns were generated, paid for and then left out
+    # of the arithmetic because nobody answered them. Not on the consensus path:
+    # there the outcome rests on each advisor's latest vote, and `tallied_round`
+    # is a floor on how often everyone spoke rather than the row that was read.
+    cut = ("" if record.terminated_by == TERMINATED_BY_CONSENSUS
+           or record.tallied_round >= record.rounds_used
+           else f", decided on round {record.tallied_round}")
     print(f"\n{colour}▸ {record.outcome.value}{NC}  "
-          f"{DIM}{record.rounds_used} rounds, {record.duration_s:.1f}s, "
+          f"{DIM}{record.rounds_used} rounds{cut}, {record.duration_s:.1f}s, "
           f"stopped by {record.terminated_by}{NC}")
     stats = process_stats()
     selector = (f", {record.selector_calls} of them turn-selection"
@@ -84,6 +92,13 @@ async def main() -> int:
     print(f"  {DIM}node: {stats.cpu_s:.1f}s CPU "
           f"({100 * stats.cpu_s / record.duration_s:.0f}% of one core), "
           f"{stats.peak_rss_mb:.0f} MB peak RSS{NC}")
+    # Both say the outcome had help, and they are not the same help: one
+    # repaired agreement two advisors had already declared one-sidedly, the
+    # other promoted a whole split vote. An outcome with neither is the only one
+    # the advisors reached on their own.
+    if record.judged_edges:
+        print(f"  {DIM}(the judge repaired {record.judged_edges} one-sided "
+              f"agreement claim(s)){NC}")
     if record.judged_cosmetic:
         print(f"  {DIM}(the judge ruled the disagreement cosmetic){NC}")
     print(f"\n{record.verdict.answer}\n")

@@ -5,14 +5,31 @@ answer worded differently? — and never who is right. Widening its remit would
 make it a fourth advisor with a casting vote, which is the opposite of what a
 three-way deliberation is for.
 
+It is asked that question twice, over different scopes, and the difference
+matters:
+
+- ``judge_pairs`` runs first, over the pairs where exactly one advisor claimed
+  agreement. Those claims exist and were not reciprocated, which on a shared
+  thread is as likely to be the turn order as a disagreement, so the judge is
+  asked whether the two positions actually differ. A cosmetic ruling repairs the
+  edge and the tally is redone.
+- ``judge_disagreement`` runs after, over all the positions at once, and can
+  promote a split vote outright.
+
+The second is skipped when the first found any real difference. Asking "are all
+of these the same answer?" after being told that two specific ones are not would
+let a vaguer question overrule a sharper one.
+
 Kept out of ``consensus.py`` so that module stays pure and can be copied
 verbatim into the sibling repo.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 
 from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.messages import StructuredMessage
@@ -31,11 +48,15 @@ logger = logging.getLogger(__name__)
 class JudgeRuling(BaseModel):
     """Structured so the answer cannot arrive as hedged prose."""
 
+    # Same threshold as JUDGE_SYSTEM_PROMPT, deliberately word for word: this
+    # description is also sent to the model, as part of the JSON schema, and two
+    # copies of a rule that drift produce a judge arguing with itself.
     substantive: bool = Field(
         description=(
-            "True if acting on one advisor's position would lead to a different "
-            "decision than acting on another's. False if they differ only in "
-            "wording, emphasis or framing."
+            "True if acting on one advisor's position would lead to a materially "
+            "different outcome than acting on another's. False if they would "
+            "lead to broadly the same course of action and differ in wording, "
+            "emphasis, framing or degree."
         )
     )
     reason: str = Field(description="One sentence. The specific difference, or its absence.")
@@ -89,3 +110,71 @@ async def judge_disagreement(
 
     logger.warning("Judge returned no ruling — leaving the split vote as it stands")
     return None
+
+
+@dataclass(frozen=True)
+class PairRulings:
+    """What the judge made of each asymmetric pair.
+
+    A pair the judge could not rule on appears in neither tuple. That is not an
+    oversight: an unreachable judge must leave the votes exactly as the advisors
+    cast them, in both directions.
+    """
+
+    #: Pairs ruled cosmetic. The tally treats these as mutual agreement.
+    repaired: tuple[tuple[str, str], ...] = ()
+    #: Pairs ruled a real difference. Any of these cancels the wider judge.
+    substantive: tuple[tuple[str, str], ...] = ()
+
+
+async def judge_pairs(
+    settings: Settings,
+    personas: PersonaSet,
+    turns: Mapping[str, MagiTurn],
+    pairs: Sequence[tuple[str, str]],
+    counter: CallCounter | None = None,
+    on_activity=None,
+) -> PairRulings:
+    """Rule on each asymmetric pair, concurrently.
+
+    One question per pair rather than one question about everything, because the
+    answer is used per edge: "MELCHIOR and CASPAR are saying the same thing,
+    BALTHASAR is not" is a MAJORITY, and a single global ruling can only ever
+    produce all or nothing.
+
+    **Concurrently on purpose.** These sit on the critical path of a voice
+    interface, after two to four minutes the operator has already waited. With
+    three advisors there are at most three pairs, so the wall-clock cost is one
+    judge call rather than three — while the token and call cost is genuinely
+    three, which is why the debate row counts calls at the client and not here.
+    """
+    if not pairs:
+        return PairRulings()
+
+    async def rule(pair: tuple[str, str]) -> JudgeRuling | None:
+        first, second = pair
+        return await judge_disagreement(
+            settings,
+            personas,
+            {first: turns[first], second: turns[second]},
+            pair,
+            counter,
+            on_activity,
+        )
+
+    rulings = await asyncio.gather(*(rule(pair) for pair in pairs))
+
+    repaired: list[tuple[str, str]] = []
+    substantive: list[tuple[str, str]] = []
+    for pair, ruling in zip(pairs, rulings, strict=True):
+        if ruling is None:
+            continue
+        if ruling.substantive:
+            substantive.append(pair)
+        else:
+            repaired.append(pair)
+            logger.info(
+                "Judge: %s and %s differ only in wording (%s)",
+                pair[0], pair[1], ruling.reason,
+            )
+    return PairRulings(repaired=tuple(repaired), substantive=tuple(substantive))

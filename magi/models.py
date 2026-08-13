@@ -150,8 +150,20 @@ class DebateRecord(BaseModel):
     #: purpose — both are non-convergence, but only one of them is an argument
     #: for a faster model.
     terminated_by: str
-    #: True when the judge promoted a split vote by ruling the difference cosmetic.
+    #: True when the judge promoted a split vote by ruling the difference
+    #: cosmetic, over all the positions at once.
     judged_cosmetic: bool = False
+    #: How many one-sided agreement claims the judge repaired into mutual ones
+    #: before the tally. Separate from ``judged_cosmetic`` because the two are
+    #: different concessions: this one says two advisors were already agreeing
+    #: and the turn order hid it, that one says a whole split vote was wording.
+    #: An UNANIMOUS with both at zero is the only one nobody helped.
+    judged_edges: int = 0
+    #: The round the outcome was decided on: the deepest one in which every
+    #: advisor spoke. Lower than ``rounds_used`` when the last round was cut off
+    #: by the budget, the clock or a crash, and lower again under a selector
+    #: that keeps re-asking the same advisor.
+    tallied_round: int = 0
     #: Who actually answered. Shorter than the configured roster when a model
     #: was unreachable and the debate went ahead without it.
     advisors_present: list[str] = Field(default_factory=list)

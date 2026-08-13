@@ -2,7 +2,7 @@
 
 How to tune MAGI's bias towards consensus and, more importantly, which of the available knobs produce agreement you can defend and which only produce agreement you can report.
 
-**Status, 2026-08-13: (b) and (d) are applied. Everything else is not**, and each lever below says which it is. The original configuration was deliberately biased the *other* way, towards earned disagreement, and every debate run against it ended in DEADLOCK. That is the reason for the change: not that disagreement is bad, but that a system which cannot express the other two outcomes is not reporting a result, it is reporting its own prompt. This document exists because "make them agree more" is a reasonable thing to want from a deliberation system, and because the obvious way to do it is the wrong one.
+**Status, 2026-08-13: (b), (d), (f) and (g) are applied. (a), (c) and (e) are not**, and each lever below says which it is. The original configuration was deliberately biased the *other* way, towards earned disagreement, and every debate run against it ended in DEADLOCK. That is the reason for the change: not that disagreement is bad, but that a system which cannot express the other two outcomes is not reporting a result, it is reporting its own prompt. This document exists because "make them agree more" is a reasonable thing to want from a deliberation system, and because the obvious way to do it is the wrong one.
 
 > **A note on the sibling repo.** Two of the levers below (the tally rule and the judge) sit in files held by contract with `magi-system`. Changing them here alone silently stops the benchmark from being a comparison. See [Relationship to sibling projects](../CLAUDE.md#relationship-to-sibling-projects).
 
@@ -51,6 +51,8 @@ The second rule differs from the third only when the claims do not form a cycle.
 The argument for changing it: the current rule requires two advisors to name each other *in the same round*, which is a coordination problem the advisors cannot see. An advisor writing its turn does not know whether the others will name it back, so a bloc forms only when both happen to reciprocate simultaneously. Three rounds is very few attempts at that.
 
 The argument against: a one-directional edge really can be one agreeable advisor pulling a bloc together on its own, and with the vote bar now lowered by (d) that is more likely than it was. If both are applied at once and `UNANIMOUS` starts firing everywhere, this is the one to revert first, because it is the one that changed the meaning of the word rather than what the models were asked.
+
+**Largely superseded, and worth reading before applying it.** Levers (f) and (g) below address the same asymmetry without weakening the rule. (f) removes the part of it caused by mixing rounds; (g) asks the judge, per one-sided pair, whether the two positions actually differ, and repairs the edge only when they do not. What is left for (a) is the case where an advisor's claim is genuinely not returned by an advisor who genuinely means something else, and counting that as consensus is the thing the mutual rule is right about. Apply (a) only if debates still deadlock uniformly with both of those in place.
 
 This lever is honest in a way the prompt levers are not: it changes what the system *counts* as consensus without changing what the models say, so the transcript still shows exactly what happened and a reader can disagree with the arithmetic. It is also the one to reach for first if the complaint is "UNANIMOUS almost never fires", because the current rule is strict enough that genuinely converged debates can still tally as MAJORITY.
 
@@ -125,6 +127,38 @@ Note that (1) and (2) differ in kind. Relaxing the `agrees_with` bar changes how
 
 **Verdict: genuine but weak, and the rounds knob confounds its own measurement.**
 
+### (f) One round of votes instead of a mixture of rounds — APPLIED 2026-08-13
+
+`magi/orchestrator/consensus.py`, `latest_complete_round()`, called from `_deliberate()`.
+
+This one is not on the agreement axis at all, which is why it was not in the original list. It is a correctness fix that happens to remove DEADLOCKs, and the distinction matters: it does not lower any bar, it stops the tally reading votes that were never cast against each other.
+
+The advisors do not vote simultaneously. On one shared thread the first speaker of a round votes on everyone else's previous positions and the last speaker votes on their revised ones, and the orchestrator used to tally "whatever each advisor said last, whenever it said it". So a debate cut off by the budget, the clock or a crash left one advisor's round-3 vote sitting next to another's round-2 vote, and a disagreement between those two is an artefact of the truncation rather than a disagreement anybody expressed. That was the asymmetry the mutual-edge rule in (a) was being blamed for.
+
+The outcome is now decided on the deepest round in which **every** advisor spoke. Later turns are still generated, still shown, still in the transcript; they are simply not counted, because the advisors they were addressed to never answered them.
+
+One exception, and it is not optional: a debate stopped by `ConsensusTermination` is tallied on the votes that stopped it. That condition watches each advisor's latest vote and ends the run on finding them unanimous, so falling back to the previous complete round would report DEADLOCK on a run whose recorded reason for ending is that it converged.
+
+**The cost, and it is real:** under `SelectorGroupChat` there are no rounds. A selector that keeps re-asking one advisor holds the tallied row at the depth of whichever advisor it asked least, so turns it paid for do not reach the arithmetic. That is a true property of what the selector did rather than a bug, but it is a systematic difference between the two engines that did not exist before. `DebateRecord.tallied_round` records the depth for exactly this reason, and any engine comparison has to read it: two rows with the same outcome and different values there were not decided on comparable evidence.
+
+**Verdict: convergence, or rather the removal of a fake divergence.** Nothing in it makes an advisor more agreeable.
+
+### (g) Pairwise repair of one-sided claims — APPLIED 2026-08-13
+
+`magi/orchestrator/consensus.py` (`asymmetric_pairs`, `tally(extra_edges=...)`) and `judge_pairs()` in `judge.py`.
+
+The other half of the same problem, and the one that needs an LLM call. Even inside one complete round the advisors write in sequence, so "A agrees with B" without B saying anything back can be two advisors holding the same view whose turns fell either side of a revision. The mutual rule discards exactly those claims; this asks the judge, once per ambiguous pair, whether the two positions actually differ. A cosmetic ruling adds the reciprocal edge and the tally is redone.
+
+Scope is deliberately narrow. Only pairs where **exactly one** side claimed agreement are asked about. A pair where neither said anything is not repaired, because there is no claim to repair, and manufacturing one would be inventing a vote rather than reading it.
+
+The pairs are judged concurrently, so three of them cost one call's latency and three calls' tokens. The wider judge described in (b) still runs afterwards, unless the pairwise pass found a real difference between two specific positions, in which case asking "are all of these the same answer?" would let a vaguer question overrule a sharper one.
+
+`DebateRecord.judged_edges` counts the repairs, separately from `judged_cosmetic`. They are different concessions: one says two advisors were already agreeing and the turn order hid it, the other says a whole split vote was wording. An outcome with both at zero is the only one the advisors reached unaided, and that has to stay visible forever.
+
+**Verdict: reportable agreement, and instrumented as such.** Weaker than (a) in effect and much better targeted: it only ever touches pairs where an advisor did declare agreement.
+
+> Shared contract with `magi-system`: `consensus.py` gained two functions and an argument, and `DebateRecord` gained two fields. Both land in the sibling repo or the benchmark stops being a comparison.
+
 ## What is not available today
 
 Two things worth knowing before designing an experiment around this.
@@ -141,9 +175,9 @@ Both are now queued together as [candidates.md § 6](candidates.md#6-an-agreemen
 
 The original advice here was "if you only do one thing, change the judge's threshold (b), because it is one sentence and it is already instrumented". That is done, along with (d), and the two were applied together deliberately: (b) only fires on a split vote, so on a roster that deadlocked every time it is the lever with the fewest opportunities to act, and (d) is what produces the split votes for it to act on.
 
-The next step is measurement, not another lever. Re-run the fixed set of contested questions and read `judged_cosmetic` against the `UNANIMOUS` rate: a rise that shows up in `judged_cosmetic` is the judge being more permissive, a rise that does not is the advisors actually converging, and those are two different results that should never be averaged.
+The next step is measurement, not another lever. Re-run the fixed set of contested questions and read `judged_cosmetic` and `judged_edges` against the `UNANIMOUS` rate: a rise that shows up in either is the judge helping, a rise that shows up in neither is the advisors actually converging, and those are different results that should never be averaged. `tallied_round` goes in the same query, because a row decided on round 2 of a 3-round debate is not comparable to one decided on round 3.
 
-Only if debates still deadlock uniformly after that, move to (a), which is the largest remaining effect and the only one that costs nothing per debate.
+Only if debates still deadlock uniformly after that, move to (a). It is the largest remaining effect and the only one that costs nothing per debate, but (f) and (g) have already taken most of what it was for.
 
 ## Measuring whether it worked
 
@@ -153,4 +187,4 @@ Whatever you change, the question is not "did `UNANIMOUS` go up". It is whether 
 2. **Read the positions for novelty.** Mode collapse is visible to the eye and invisible to the tally: if the three `position` fields in the final round share sentences, the consensus is an echo. This is what the `position` novelty requirement in `deliberation_seed()` exists to prevent.
 3. **Split `judged_cosmetic` out of the `UNANIMOUS` rate.** They answer different questions and averaging them hides which lever moved.
 
-`DebateRecord` carries `terminated_by`, `judged_cosmetic`, `rounds_used` and `outcome`, which is enough for all three without adding instrumentation.
+`DebateRecord` carries `terminated_by`, `judged_cosmetic`, `judged_edges`, `rounds_used`, `tallied_round` and `outcome`, which is enough for all three without adding instrumentation. It is not yet written anywhere: `store/debates.py` does not exist, so today this is read off `scripts/ask.py`'s summary line one debate at a time.

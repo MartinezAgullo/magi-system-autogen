@@ -56,6 +56,10 @@ SPAN_PHASE_VERDICT = "magi.phase.verdict"
 SPAN_ROUND = "magi.round"
 SPAN_TURN = "magi.turn"
 SPAN_JUDGE = "magi.judge"
+#: The pairwise pass that runs before it, one span over all the pairs. Separate
+#: from SPAN_JUDGE because the two answer different questions and a latency
+#: breakdown that merged them could not say which one cost the debate.
+SPAN_JUDGE_PAIRS = "magi.judge.pairs"
 SPAN_TALLY = "magi.tally"
 SPAN_STT = "magi.stt"
 SPAN_TTS = "magi.tts"
@@ -84,6 +88,16 @@ ATTR_TERMINATED_BY = "magi.terminated_by"
 ATTR_LLM_CALLS = "magi.llm_calls"
 ATTR_ADVISORS_PRESENT = "magi.advisors_present"
 ATTR_JUDGED_COSMETIC = "magi.judged_cosmetic"
+#: How many asymmetric agreement claims the judge repaired into mutual ones.
+#: Agreement the advisors declared and agreement a judge granted have to stay
+#: distinguishable, or a rise in UNANIMOUS cannot be attributed to either.
+ATTR_JUDGED_EDGES = "magi.judged_edges"
+#: The round the outcome was decided on, which is the deepest one where every
+#: advisor had spoken. Lower than `rounds_used` whenever the last round was cut
+#: short, and systematically lower under a selector that asks unevenly. Two rows
+#: with the same outcome and different values here were not decided on
+#: comparable evidence.
+ATTR_TALLIED_ROUND = "magi.tallied_round"
 ATTR_SELECTOR_CALLS = "magi.selector_calls"
 #: Set when an advisor exhausted its token budget on reasoning and the call was
 #: retried with more room. Worth querying: a model that trips this often is one

@@ -23,6 +23,7 @@ import logging
 import time
 import uuid
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 from autogen_agentchat.base import TaskResult
 from autogen_agentchat.conditions import ExternalTermination
@@ -39,12 +40,14 @@ from magi.constants import (
     ATTR_DEBATE_ID,
     ATTR_ENGINE,
     ATTR_JUDGED_COSMETIC,
+    ATTR_JUDGED_EDGES,
     ATTR_LLM_CALLS,
     ATTR_MODELS,
     ATTR_OUTCOME,
     ATTR_ROUND,
     ATTR_ROUNDS_USED,
     ATTR_SELECTOR_CALLS,
+    ATTR_TALLIED_ROUND,
     ATTR_TERMINATED_BY,
     ATTR_TRACING_ENABLED,
     GEN_AI_USAGE_INPUT,
@@ -52,11 +55,13 @@ from magi.constants import (
     SELECTOR_LABEL,
     SPAN_DEBATE,
     SPAN_JUDGE,
+    SPAN_JUDGE_PAIRS,
     SPAN_PHASE_BLIND,
     SPAN_PHASE_DELIBERATION,
     SPAN_PHASE_VERDICT,
     SPAN_TALLY,
     SPAN_TURN,
+    TERMINATED_BY_CONSENSUS,
     TERMINATED_BY_ERROR,
     TERMINATED_BY_INSUFFICIENT,
     TOPIC_ACTIVITY,
@@ -68,8 +73,13 @@ from magi.constants import (
 from magi.models import DebateRecord, MagiTurn, MagiVerdict, Outcome, TurnRecord
 from magi.orchestrator import prompts
 from magi.orchestrator.clients import build_advisor, build_advisors, build_client
-from magi.orchestrator.consensus import Tally, tally
-from magi.orchestrator.judge import judge_disagreement
+from magi.orchestrator.consensus import (
+    Tally,
+    asymmetric_pairs,
+    latest_complete_round,
+    tally,
+)
+from magi.orchestrator.judge import judge_disagreement, judge_pairs
 from magi.orchestrator.teams import build_team
 from magi.orchestrator.termination import build_termination
 from magi.personas import PersonaSet
@@ -77,6 +87,19 @@ from magi.services.metrics import CallCounter
 from magi.setup.setup_tracing import get_tracer
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _Deliberation:
+    """What phase B produced, and on how much of it the outcome rests."""
+
+    #: One turn per advisor, all from the same round — the row the tally reads.
+    turns: dict[str, MagiTurn]
+    terminated_by: str
+    #: Rounds in which any turn happened, including the blind one. Work done.
+    rounds_used: int
+    #: The deepest round every advisor reached. Evidence the outcome rests on.
+    tallied_round: int
 
 
 class Magi:
@@ -174,15 +197,15 @@ class Magi:
 
     async def _deliberate(
         self, question: str, blind: Mapping[str, MagiTurn]
-    ) -> tuple[dict[str, MagiTurn], str, int]:
-        """Run the group chat. Returns the final turns, what stopped it, and rounds used."""
+    ) -> _Deliberation:
+        """Run the group chat, and pick the row of votes the outcome rests on."""
         advisors = build_advisors(
             self._settings, self._personas, self._counter, self._publish_activity
         )
         present = [a for a in advisors if a.name in blind]
         if len(present) < 2:
             logger.warning("Fewer than two advisors answered — skipping deliberation")
-            return dict(blind), TERMINATED_BY_INSUFFICIENT, 1
+            return _Deliberation(dict(blind), TERMINATED_BY_INSUFFICIENT, 1, 1)
 
         self._external = ExternalTermination()
         terminators = build_termination(
@@ -196,7 +219,14 @@ class Magi:
             question, blind, [p.name for p in self._personas.magi]
         )
 
-        turns = dict(blind)
+        # Every turn each advisor produced, in order, blind round first. Kept as
+        # a history rather than as "the latest per advisor" because the tally
+        # needs one round of votes and not a mixture of rounds: whoever spoke
+        # last in a truncated debate would otherwise have its newest position
+        # counted against everyone else's previous one.
+        history: dict[str, list[MagiTurn]] = {
+            name: [turn] for name, turn in blind.items()
+        }
         deliberation_turns = 0
         # Read from the latches after the run, never from `condition.terminated`
         # and never by sampling during the stream. The group chat manager resets
@@ -218,7 +248,7 @@ class Magi:
                     ):
                         deliberation_turns += 1
                         name = message.source.upper()
-                        turns[name] = message.content
+                        history.setdefault(name, []).append(message.content)
                         # Round 1 was blind, so deliberation starts at round 2.
                         # Under SelectorGroupChat there are no rounds — the
                         # selector may call the same advisor after two others,
@@ -257,7 +287,25 @@ class Magi:
             phase_span.set_attribute(ATTR_ROUND, deliberation_turns)
 
         rounds_used = 1 + -(-deliberation_turns // len(present))  # ceil
-        return turns, stopped_by, rounds_used
+        # "Every advisor has spoken at least this many times." Under a complete
+        # round it is the round itself; on the consensus path below the row is
+        # deeper than this for whoever spoke last, so it reads as a floor.
+        tallied_round = min(len(turns) for turns in history.values())
+
+        if stopped_by == TERMINATED_BY_CONSENSUS:
+            # ConsensusTermination watched each advisor's latest vote and
+            # stopped the debate on finding them unanimous. Tallying a different
+            # row here would let the record say DEADLOCK about a run whose
+            # stated reason for ending is that it converged, so the row that
+            # stopped it is the row that counts. Reconstructed from `history`
+            # rather than read off the condition: the group chat manager resets
+            # the whole stack the instant one fires, and `latest_turns` is
+            # already empty by the time this line runs.
+            decided = {name: turns[-1] for name, turns in history.items()}
+        else:
+            decided = latest_complete_round(history)
+
+        return _Deliberation(decided, stopped_by, rounds_used, tallied_round)
 
     async def _verdict(
         self, question: str, turns: Mapping[str, MagiTurn], result: Tally
@@ -325,16 +373,47 @@ class Magi:
             root.set_attribute(ATTR_TRACING_ENABLED, self._tracer_provider is not None)
 
             blind = await self._blind_round(question)
-            turns, terminated_by, rounds_used = await self._deliberate(question, blind)
+            deliberation = await self._deliberate(question, blind)
+            turns = deliberation.turns
+            terminated_by = deliberation.terminated_by
+            rounds_used = deliberation.rounds_used
 
-            with tracer.start_as_current_span(SPAN_TALLY):
+            with tracer.start_as_current_span(SPAN_TALLY) as tally_span:
+                tally_span.set_attribute(ATTR_TALLIED_ROUND, deliberation.tallied_round)
                 result = tally(turns)
 
-            # The judge runs only on a split vote, and only to decide whether
-            # the disagreement is real. A ruling of "cosmetic" promotes the
-            # outcome; a judge that could not be reached leaves it as it was.
-            judged_cosmetic = False
+            # The judge runs twice over different scopes, and only ever on a
+            # split vote. First per ambiguous pair, then — if that found no real
+            # difference — over everything at once. See judge.py.
+            repaired: tuple[tuple[str, str], ...] = ()
+            settled_pair = False
             if not result.unanimous and len(turns) > 1:
+                pairs = asymmetric_pairs(turns)
+                if pairs:
+                    with tracer.start_as_current_span(SPAN_JUDGE_PAIRS) as pair_span:
+                        rulings = await judge_pairs(
+                            self._settings, self._personas, turns, pairs,
+                            self._counter, self._publish_activity,
+                        )
+                        pair_span.set_attribute("magi.pairs", len(pairs))
+                        pair_span.set_attribute("magi.repaired", len(rulings.repaired))
+                    repaired = rulings.repaired
+                    settled_pair = bool(rulings.substantive)
+                    if repaired:
+                        result = tally(turns, extra_edges=repaired)
+                        logger.info(
+                            "[%s] Judge repaired %d one-sided claim(s): %s",
+                            debate_id, len(repaired),
+                            "; ".join(f"{a}+{b}" for a, b in repaired),
+                        )
+
+            # A ruling of "cosmetic" promotes the outcome; a judge that could
+            # not be reached leaves it as it was. Skipped when the pairwise pass
+            # already found a real difference between two specific positions:
+            # a vaguer question must not overrule a sharper one that was asked
+            # of the same model minutes earlier.
+            judged_cosmetic = False
+            if not result.unanimous and len(turns) > 1 and not settled_pair:
                 with tracer.start_as_current_span(SPAN_JUDGE) as judge_span:
                     ruling = await judge_disagreement(
                         self._settings, self._personas, turns, order, self._counter,
@@ -356,6 +435,8 @@ class Magi:
             root.set_attribute(ATTR_ROUNDS_USED, rounds_used)
             root.set_attribute(ATTR_TERMINATED_BY, terminated_by)
             root.set_attribute(ATTR_JUDGED_COSMETIC, judged_cosmetic)
+            root.set_attribute(ATTR_JUDGED_EDGES, len(repaired))
+            root.set_attribute(ATTR_TALLIED_ROUND, deliberation.tallied_round)
             root.set_attribute(ATTR_ADVISORS_PRESENT, sorted(turns))
             root.set_attribute(ATTR_LLM_CALLS, self._counter.total.calls)
             root.set_attribute(
@@ -371,12 +452,18 @@ class Magi:
                 outcome=result.outcome,
                 verdict=verdict,
                 turns=[
-                    TurnRecord(advisor=name, round_index=rounds_used, turn=turn)
+                    TurnRecord(
+                        advisor=name,
+                        round_index=deliberation.tallied_round,
+                        turn=turn,
+                    )
                     for name, turn in turns.items()
                 ],
                 rounds_used=rounds_used,
                 terminated_by=terminated_by,
                 judged_cosmetic=judged_cosmetic,
+                judged_edges=len(repaired),
+                tallied_round=deliberation.tallied_round,
                 advisors_present=sorted(turns),
                 models={p.name: p.model for p in self._personas.magi},
                 duration_s=elapsed,

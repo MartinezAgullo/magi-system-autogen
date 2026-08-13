@@ -8,7 +8,11 @@ most needs to be pinned down by tests rather than by reading.
 from __future__ import annotations
 
 from magi.models import MagiTurn, Outcome
-from magi.orchestrator.consensus import tally
+from magi.orchestrator.consensus import (
+    asymmetric_pairs,
+    latest_complete_round,
+    tally,
+)
 
 ADVISORS = ("MELCHIOR", "BALTHASAR", "CASPAR")
 
@@ -181,3 +185,138 @@ def test_a_full_roster_adds_no_such_warning():
     task = verdict_task("q", turns, ADVISORS, Outcome.DEADLOCK, (), ADVISORS)
 
     assert "did not take part" not in task
+
+
+# ── One round of votes, not a mixture of rounds ──────────────────────────────
+
+
+def test_the_deepest_row_everyone_reached_is_the_one_tallied():
+    history = {
+        "MELCHIOR": [turn([]), turn(["CASPAR"])],
+        "BALTHASAR": [turn([]), turn([])],
+        "CASPAR": [turn([]), turn(["MELCHIOR"])],
+    }
+
+    row = latest_complete_round(history)
+
+    assert {name: t.agrees_with for name, t in row.items()} == {
+        "MELCHIOR": ["CASPAR"],
+        "BALTHASAR": [],
+        "CASPAR": ["MELCHIOR"],
+    }
+
+
+def test_a_round_one_advisor_never_finished_is_left_out():
+    """The reason this function exists. MELCHIOR spoke in round 3 and the debate
+    was cut off before CASPAR answered it, so MELCHIOR's newest vote refers to
+    positions the other two have not yet responded to. Counting it against their
+    round-2 votes reads as a disagreement that nobody expressed."""
+    history = {
+        "MELCHIOR": [turn([]), turn(["BALTHASAR"]), turn([])],
+        "BALTHASAR": [turn([]), turn(["MELCHIOR"])],
+        "CASPAR": [turn([]), turn([])],
+    }
+
+    row = latest_complete_round(history)
+
+    assert tally(row).outcome is Outcome.MAJORITY
+    assert set(tally(row).majority) == {"MELCHIOR", "BALTHASAR"}
+
+
+def test_an_empty_history_has_no_round():
+    assert latest_complete_round({}) == {}
+    assert latest_complete_round({"MELCHIOR": []}) == {}
+
+
+# ── Asymmetric claims, and repairing them ────────────────────────────────────
+
+
+def test_a_one_sided_claim_is_an_asymmetric_pair():
+    pairs = asymmetric_pairs(
+        {
+            "MELCHIOR": turn(["BALTHASAR"]),
+            "BALTHASAR": turn([]),
+            "CASPAR": turn([]),
+        }
+    )
+
+    assert pairs == (("BALTHASAR", "MELCHIOR"),)
+
+
+def test_mutual_and_silent_pairs_are_not_ambiguous():
+    """Nothing to ask about: the first pair agreed in both directions, and
+    nobody said anything about CASPAR at all. Only a claim that exists and was
+    not returned is worth an LLM call."""
+    pairs = asymmetric_pairs(
+        {
+            "MELCHIOR": turn(["BALTHASAR"]),
+            "BALTHASAR": turn(["MELCHIOR"]),
+            "CASPAR": turn([]),
+        }
+    )
+
+    assert pairs == ()
+
+
+def test_a_cycle_is_three_asymmetric_pairs():
+    """A→B→C→A is the shape that tallies as DEADLOCK while every advisor has
+    declared agreement with somebody. Every pair in it is one-sided."""
+    pairs = asymmetric_pairs(
+        {
+            "MELCHIOR": turn(["BALTHASAR"]),
+            "BALTHASAR": turn(["CASPAR"]),
+            "CASPAR": turn(["MELCHIOR"]),
+        }
+    )
+
+    assert len(pairs) == 3
+
+
+def test_a_repaired_edge_turns_a_deadlock_into_a_majority():
+    turns = {
+        "MELCHIOR": turn(["BALTHASAR"]),
+        "BALTHASAR": turn([]),
+        "CASPAR": turn([]),
+    }
+
+    assert tally(turns).outcome is Outcome.DEADLOCK
+
+    result = tally(turns, extra_edges=[("BALTHASAR", "MELCHIOR")])
+
+    assert result.outcome is Outcome.MAJORITY
+    assert set(result.majority) == {"BALTHASAR", "MELCHIOR"}
+    assert result.dissent == ("CASPAR",)
+
+
+def test_repairing_every_edge_of_a_cycle_is_unanimous():
+    turns = {
+        "MELCHIOR": turn(["BALTHASAR"]),
+        "BALTHASAR": turn(["CASPAR"]),
+        "CASPAR": turn(["MELCHIOR"]),
+    }
+    pairs = asymmetric_pairs(turns)
+
+    assert tally(turns).outcome is Outcome.DEADLOCK
+    assert tally(turns, extra_edges=pairs).outcome is Outcome.UNANIMOUS
+
+
+def test_an_extra_edge_for_an_advisor_that_never_spoke_is_ignored():
+    """A repair can only ever be about turns that exist. Anything else would let
+    an absent advisor into a bloc."""
+    turns = {"MELCHIOR": turn([]), "BALTHASAR": turn([])}
+
+    result = tally(turns, extra_edges=[("MELCHIOR", "CASPAR")])
+
+    assert result.outcome is Outcome.DEADLOCK
+
+
+def test_no_extra_edges_is_the_plain_reading_of_the_votes():
+    """The default has to stay the advisors' own words: every caller that does
+    not ask for a repair must see exactly what they declared."""
+    turns = {
+        "MELCHIOR": turn(["BALTHASAR"]),
+        "BALTHASAR": turn([]),
+        "CASPAR": turn([]),
+    }
+
+    assert tally(turns).outcome is Outcome.DEADLOCK

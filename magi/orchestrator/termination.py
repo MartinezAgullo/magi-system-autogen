@@ -69,8 +69,15 @@ class ConsensusTermination(TerminationCondition):
 
     @property
     def latest_turns(self) -> dict[str, MagiTurn]:
-        """The votes as they stood when the debate ended. The orchestrator
-        tallies these rather than re-parsing the transcript."""
+        """The votes as they stand right now.
+
+        **Not readable after a run.** The group chat manager resets the whole
+        termination stack the moment any condition fires, which clears this, for
+        the same reason ``terminated`` cannot be read afterwards either — see
+        ``Latching``. The orchestrator therefore accumulates its own copy of the
+        turns as they stream past, and this exists for tests and for anything
+        inspecting the condition mid-flight.
+        """
         return dict(self._latest)
 
     async def __call__(
@@ -161,8 +168,9 @@ class Latching(TerminationCondition):
 class Terminators:
     """The composed stop condition, plus the parts, for one debate.
 
-    ``consensus`` is exposed unwrapped because the orchestrator reads
-    ``latest_turns`` off it. The rest are only ever asked whether they fired.
+    ``consensus`` is exposed unwrapped for tests and for inspection mid-run; the
+    rest are only ever asked whether they fired. Do not read ``latest_turns``
+    off it once the run is over — the manager's reset has already cleared it.
     """
 
     condition: TerminationCondition
