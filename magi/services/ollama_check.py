@@ -52,19 +52,29 @@ logger = logging.getLogger(__name__)
 Level = Literal["ok", "warn", "error"]
 
 
+#: Tags the checks that speak about model residency on the inference host. The
+#: daemon reads their verdict back out of the database at boot and stamps it on
+#: every debate row, so it has to be identifiable as something other than a
+#: string in a message an operator might reword.
+KEY_RESIDENCY = "residency"
+
+
 @dataclass
 class CheckResult:
     level: Level
     message: str
     hints: list[str] = field(default_factory=list)
+    #: Empty for most checks. Set where something downstream needs to find this
+    #: result again rather than read it.
+    key: str = ""
 
 
 @dataclass
 class PreflightReport:
     results: list[CheckResult] = field(default_factory=list)
 
-    def add(self, level: Level, message: str, *hints: str) -> None:
-        self.results.append(CheckResult(level, message, list(hints)))
+    def add(self, level: Level, message: str, *hints: str, key: str = "") -> None:
+        self.results.append(CheckResult(level, message, list(hints), key))
 
     @property
     def failed(self) -> bool:
@@ -73,6 +83,27 @@ class PreflightReport:
     @property
     def warned(self) -> bool:
         return any(r.level == "warn" for r in self.results)
+
+    @property
+    def residency_warning(self) -> bool | None:
+        """Whether the inference host is holding every model resident.
+
+        Three-valued, and the third value is the point: ``None`` means residency
+        was never observed — an API-key backend, an Ollama too old for
+        ``/api/ps``, or a pre-flight that aborted before it got there. A debate
+        row that recorded ``False`` there would claim a check that never ran.
+        """
+        relevant = [r for r in self.results if r.key == KEY_RESIDENCY]
+        if not relevant:
+            return None
+        return any(r.level == "warn" for r in relevant)
+
+    def residency_detail(self) -> str:
+        """The residency messages, for the operator reading a later log line."""
+        return "; ".join(
+            r.message for r in self.results
+            if r.key == KEY_RESIDENCY and r.level == "warn"
+        )
 
 
 # ── Ollama API ───────────────────────────────────────────────────────────────
@@ -369,6 +400,7 @@ def _check_keep_alive(
             "Models expire sooner than one debate can take: " + ", ".join(soon),
             "They will be evicted and reloaded mid-debate, which shows up as one",
             "inexplicably slow turn. On the inference host:  OLLAMA_KEEP_ALIVE=1h",
+            key=KEY_RESIDENCY,
         )
 
 
@@ -475,6 +507,7 @@ async def _check_ollama(
                 "warn",
                 "Could not read /api/ps — model residency is unknown",
                 "Latency figures from this run may include model reloads.",
+                key=KEY_RESIDENCY,
             )
         else:
             resident = {m["name"] for m in running}
@@ -489,12 +522,14 @@ async def _check_ollama(
                     "On the inference host:",
                     f"  OLLAMA_MAX_LOADED_MODELS={len(wanted)}",
                     "  OLLAMA_KEEP_ALIVE=1h",
+                    key=KEY_RESIDENCY,
                 )
             else:
                 total_gb = sum(m.get("size", 0) for m in running) / 1e9
                 report.add(
                     "ok",
                     f"All {len(wanted)} models resident ({total_gb:.0f} GB)",
+                    key=KEY_RESIDENCY,
                 )
 
             _check_keep_alive(report, running, wanted, settings.debate_timeout_s)

@@ -31,7 +31,9 @@ Consequently this repo commits to AutoGen fully: where a choice exists between d
 
 **Watchable while it thinks.** The console shows which advisor is generating right now, and the terminal can show the sentence forming: set `stream: true` on an advisor in `config/magi.yaml` and its position is drawn live, then erased when complete so the one-line log lands in its place. Off by default, and per advisor rather than global — a streamed call gives up the wider-budget retry, so the reasoning seat should not take it. Pre-flight verifies streaming advisors over the streaming path and warns about that combination.
 
-Still to build: the SQLite benchmark store, and TTS so the verdict is spoken as well as shown. See `CLAUDE.md` § Status.
+**Every debate is recorded.** One row per debate in SQLite, with the full transcript and what the run cost the node, written by both the daemon and `scripts/ask.py`. `scripts/report.py` reads it back: the `UNANIMOUS` rate split into what the advisors reached unaided and what the judge granted them, and the roundrobin-vs-selector cost comparison, grouped by engine, with runs that are not comparable with the rest excluded and named rather than quietly averaged in. The schema is a contract shared with the sibling repo, so the two implementations' databases can simply be concatenated.
+
+Still to build: TTS, so the verdict is spoken as well as shown. See `CLAUDE.md` § Status.
 
 The load-bearing assumption is **verified**: as of 2026-08-11, on Ollama 0.23.2, all three default advisors return a `MagiTurn` that is both schema-valid and substantive over the OpenAI-compatible endpoint. Getting there needed two per-model settings that are not obvious and are documented in `config/magi.yaml`: reasoning must stay **on** for `nemotron3:33b` (it produces nothing valid with it suppressed) and **off** for `gemma3:12b` (3/5 valid with it on, 5/5 with it off), and a reasoning model needs roughly triple the token budget because it spends it before writing any answer.
 

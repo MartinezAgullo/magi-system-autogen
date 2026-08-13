@@ -16,6 +16,7 @@ import sys
 from magi import personas as personas_mod
 from magi.config import Settings
 from magi.services.ollama_check import PreflightReport, run_preflight
+from magi.store.debates import DebateStore
 
 GREEN = "\033[0;32m"
 YELLOW = "\033[1;33m"
@@ -35,6 +36,34 @@ def _print(report: PreflightReport) -> None:
             print(f"      {DIM}{hint}{NC}")
 
 
+async def _record(settings: Settings, report: PreflightReport) -> None:
+    """Leave the verdict where the daemon can find it.
+
+    This runs as its own process, seconds before the node starts, so the
+    database is the only channel between the two — and the fact worth passing
+    along is model residency on the inference host, which decides whether the
+    latency figures a run produces are about the framework or about the Spark's
+    disk. Every debate row then carries it, and a suspect run can be excluded
+    from the benchmark afterwards instead of silently widening the averages.
+
+    Best effort, deliberately. Pre-flight's job is to say whether the node can
+    work; failing it over a bookkeeping write would be the check causing the
+    outage it exists to prevent.
+    """
+    try:
+        store = DebateStore(settings.db_path)
+        await asyncio.to_thread(
+            store.record_preflight_sync,
+            settings.node_id,
+            failed=report.failed,
+            warned=report.warned,
+            residency_warning=report.residency_warning,
+            detail=report.residency_detail(),
+        )
+    except Exception as exc:  # noqa: BLE001 — nothing here is worth failing over
+        print(f"      {DIM}(could not record this run in {settings.db_path}: {exc}){NC}")
+
+
 async def _run() -> int:
     settings = Settings()
 
@@ -51,6 +80,7 @@ async def _run() -> int:
 
     report = await run_preflight(settings, personas)
     _print(report)
+    await _record(settings, report)
     print()
 
     if report.failed:

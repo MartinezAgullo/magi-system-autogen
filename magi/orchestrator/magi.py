@@ -22,8 +22,9 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from autogen_agentchat.base import TaskResult
 from autogen_agentchat.conditions import ExternalTermination
@@ -50,6 +51,7 @@ from magi.constants import (
     ATTR_TALLIED_ROUND,
     ATTR_TERMINATED_BY,
     ATTR_TRACING_ENABLED,
+    BLIND_ROUND,
     GEN_AI_USAGE_INPUT,
     GEN_AI_USAGE_OUTPUT,
     SELECTOR_LABEL,
@@ -83,8 +85,9 @@ from magi.orchestrator.judge import judge_disagreement, judge_pairs
 from magi.orchestrator.teams import build_team
 from magi.orchestrator.termination import build_termination
 from magi.personas import PersonaSet
-from magi.services.metrics import CallCounter
+from magi.services.metrics import CallCounter, ProcessSampler
 from magi.setup.setup_tracing import get_tracer
+from magi.store.debates import DebateStore
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +103,12 @@ class _Deliberation:
     rounds_used: int
     #: The deepest round every advisor reached. Evidence the outcome rests on.
     tallied_round: int
+    #: Every turn of the debate in the order it was spoken, blind round first,
+    #: with ``tallied`` set on the ones above. The tally needs a single row; the
+    #: record needs all of them, because a transcript that keeps only the last
+    #: turn per advisor cannot answer whether the three positions converged or
+    #: collapsed into each other.
+    transcript: tuple[TurnRecord, ...] = ()
 
 
 class Magi:
@@ -111,10 +120,18 @@ class Magi:
         personas: PersonaSet,
         bus: Bus | None = None,
         tracer_provider=None,
+        store: DebateStore | None = None,
+        residency_warning: bool | None = None,
     ) -> None:
         self._settings = settings
         self._personas = personas
         self._bus = bus
+        self._store = store
+        # What the last pre-flight said about model residency on the inference
+        # host, or None when nothing recent looked. Carried on every row so a
+        # run whose weights were evicted mid-debate can be excluded from the
+        # benchmark afterwards instead of quietly widening every latency figure.
+        self._residency_warning = residency_warning
         self._external: ExternalTermination | None = None
         # Not passed to AutoGen — it reads the global provider that
         # setup_tracing() registers (see _deliberate). Held only to record on
@@ -202,10 +219,21 @@ class Magi:
         advisors = build_advisors(
             self._settings, self._personas, self._counter, self._publish_activity
         )
+        # The transcript starts with the blind round: those turns are as much a
+        # part of the debate as the deliberated ones, and on a run that never
+        # reaches the group chat they are the whole of it.
+        transcript: list[TurnRecord] = [
+            TurnRecord(advisor=name, round_index=BLIND_ROUND, turn=turn)
+            for name, turn in blind.items()
+        ]
+
         present = [a for a in advisors if a.name in blind]
         if len(present) < 2:
             logger.warning("Fewer than two advisors answered — skipping deliberation")
-            return _Deliberation(dict(blind), TERMINATED_BY_INSUFFICIENT, 1, 1)
+            return _Deliberation(
+                dict(blind), TERMINATED_BY_INSUFFICIENT, 1, 1,
+                _mark_tallied(transcript, dict(blind)),
+            )
 
         self._external = ExternalTermination()
         terminators = build_termination(
@@ -263,6 +291,17 @@ class Magi:
                         phase_span.add_event(
                             SPAN_TURN, {ATTR_ADVISOR: name, ATTR_ROUND: round_index}
                         )
+                        # The round index was already computed here and then
+                        # thrown away: the record used to stamp every turn with
+                        # the final round, so a three-round debate read as three
+                        # advisors speaking once each, in the last round.
+                        transcript.append(
+                            TurnRecord(
+                                advisor=name,
+                                round_index=round_index,
+                                turn=message.content,
+                            )
+                        )
                         await self._publish_turn(name, message.content, round_index)
             except Exception as exc:
                 # One advisor failing must not lose the debate. This is where
@@ -305,7 +344,10 @@ class Magi:
         else:
             decided = latest_complete_round(history)
 
-        return _Deliberation(decided, stopped_by, rounds_used, tallied_round)
+        return _Deliberation(
+            decided, stopped_by, rounds_used, tallied_round,
+            _mark_tallied(transcript, decided),
+        )
 
     async def _verdict(
         self, question: str, turns: Mapping[str, MagiTurn], result: Tally
@@ -341,7 +383,42 @@ class Magi:
     # ── Entry point ──────────────────────────────────────────────────────
 
     async def debate(self, question: str) -> DebateRecord:
+        """One question in, one recorded verdict out.
+
+        The two things wrapped around the debate proper are the two the
+        benchmark is made of: a sampler watching what the node spends while it
+        runs, and the write that makes the run survive the process.
+        """
+        async with ProcessSampler(
+            self._settings.metrics_sample_interval_s,
+            enabled=self._settings.metrics_enabled,
+        ) as sampler:
+            record = await self._debate(question, sampler)
+
+        await self._persist(record)
+        return record
+
+    async def _persist(self, record: DebateRecord) -> None:
+        """Write the row, and never lose the answer over a failed write.
+
+        After the verdict has already been published, deliberately. The operator
+        is waiting on the spoken answer, not on the benchmark record, and the
+        write goes to a thread anyway — but ordering it this way means a full
+        disk costs a row and not the debate that produced it.
+        """
+        if self._store is None:
+            return
+        try:
+            await self._store.save(record)
+        except Exception:
+            logger.exception("Could not record debate %s — the row is lost, the "
+                             "verdict is not", record.debate_id)
+
+    async def _debate(self, question: str, sampler: ProcessSampler) -> DebateRecord:
         started = time.monotonic()
+        # Wall clock as well as a monotonic start: the first is what every
+        # cross-run query orders by, the second is the only one safe to subtract.
+        started_at = datetime.now(UTC)
         debate_id = uuid.uuid4().hex[:12]
         order = [p.name for p in self._personas.magi]
         self._counter.reset()
@@ -451,14 +528,10 @@ class Magi:
                 engine=self._settings.engine,
                 outcome=result.outcome,
                 verdict=verdict,
-                turns=[
-                    TurnRecord(
-                        advisor=name,
-                        round_index=deliberation.tallied_round,
-                        turn=turn,
-                    )
-                    for name, turn in turns.items()
-                ],
+                # The whole transcript, not one turn per advisor. Each turn
+                # carries the round it was actually spoken in, and the ones the
+                # outcome rests on carry `tallied`.
+                turns=list(deliberation.transcript),
                 rounds_used=rounds_used,
                 terminated_by=terminated_by,
                 judged_cosmetic=judged_cosmetic,
@@ -467,11 +540,20 @@ class Magi:
                 advisors_present=sorted(turns),
                 models={p.name: p.model for p in self._personas.magi},
                 duration_s=elapsed,
+                node_id=self._settings.node_id,
+                started_at=started_at,
+                max_rounds=self._settings.max_rounds,
+                streamed_advisors=self._personas.streaming_names(),
+                residency_warning=self._residency_warning,
                 llm_calls=self._counter.total.calls,
                 selector_calls=self._counter.by_label[SELECTOR_LABEL].calls,
                 prompt_tokens=self._counter.total.prompt_tokens,
                 completion_tokens=self._counter.total.completion_tokens,
                 tracing_enabled=self._tracer_provider is not None,
+                # Read here rather than after the sampler stops, so the record is
+                # complete the moment it exists. It costs one more sample's worth
+                # of resolution and buys a record that is never briefly wrong.
+                node=sampler.cost(),
             )
 
         logger.info(
@@ -539,6 +621,23 @@ def _as_verdict_agent(
         system_message=personas.system_prompt_for(personas.orchestrator),
         output_content_type=MagiVerdict,
     )
+
+
+def _mark_tallied(
+    transcript: Sequence[TurnRecord], decided: Mapping[str, MagiTurn]
+) -> tuple[TurnRecord, ...]:
+    """Flag the turns the outcome was computed from.
+
+    Matched by object identity rather than by advisor and round, because the two
+    paths that pick the decided row do not agree on what a round is: a debate
+    stopped by consensus is tallied on each advisor's latest vote, which can sit
+    at three different depths. The objects are the same ones the tally read, so
+    identity says exactly what happened and no reconstruction can disagree with
+    it later.
+    """
+    for entry in transcript:
+        entry.tallied = decided.get(entry.advisor) is entry.turn
+    return tuple(transcript)
 
 
 def _last_turn(result: TaskResult) -> MagiTurn | None:

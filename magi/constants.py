@@ -191,6 +191,15 @@ GENERIC_ADVISOR_PROMPT = (
 )
 PROBE_QUESTION = "Should a three-person startup adopt Kubernetes for its first product?"
 
+# How long a recorded pre-flight is taken to still describe the node.
+#
+# `launch.sh` runs the checks seconds before the daemon starts, so anything
+# recent is about this boot. An hour later it is about a machine that may have
+# evicted every model since, and inheriting that verdict would stamp an
+# all-clear on rows nobody checked — the one thing the residency flag exists to
+# prevent. Past this, a debate records "unknown" instead.
+PREFLIGHT_FRESH_S = 3600.0
+
 # ── Timeouts ─────────────────────────────────────────────────────────────────
 
 # Supervision backoff ceiling. Long enough not to hammer a downed Spark, short

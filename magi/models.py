@@ -18,6 +18,7 @@ Schema constraints worth knowing before editing:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -125,6 +126,47 @@ class TurnRecord(BaseModel):
     advisor: str
     round_index: int
     turn: MagiTurn
+    #: True on the turns the outcome was actually computed from — the row
+    #: ``latest_complete_round`` returned, or the votes ``ConsensusTermination``
+    #: stopped on. Everything else was generated, paid for, shown on the console
+    #: and then left out of the arithmetic, and the difference has to survive
+    #: into the record: ``tallied_round`` says how deep the row was, this says
+    #: which turns it was. Never true on a turn published live, because at that
+    #: point nothing knows yet.
+    tallied: bool = False
+
+
+class NodeCost(BaseModel):
+    """What one debate cost the node it ran on, as opposed to the inference host.
+
+    This is the number the project exists to produce. The Spark generates the
+    tokens either way, so wall-clock barely moves between a MacBook and a Pi;
+    what moves is the CPU and the resident memory a framework runtime consumes
+    on a 4-core ARM board, and nobody publishes that.
+
+    Sampled over the debate rather than read once at the end: ``getrusage``
+    reports a peak for the life of the process, which after an hour of uptime
+    answers a different question than "how big did this debate make the node".
+
+    It is the whole **process**, not the debate in isolation. On a node that is
+    also serving the console, sampling telemetry and holding a Whisper model,
+    all of that is in here. That is the right number for "what does the node
+    cost" and the wrong one for "what does the debate cost", so a benchmark run
+    should be a node doing nothing else — which is what ``scripts/ask.py`` is.
+    """
+
+    #: CPU seconds burned between the start and the end of the debate, from
+    #: ``getrusage`` deltas rather than from the samples: an exact figure for the
+    #: window costs the same as an approximate one.
+    cpu_s: float = 0.0
+    #: ``cpu_s`` as a percentage of one core over the debate's wall clock. Above
+    #: 100 means more than one core was busy.
+    cpu_percent: float = 0.0
+    peak_rss_mb: float = 0.0
+    mean_rss_mb: float = 0.0
+    #: How many RSS samples that mean is over. One sample is a reading, not a
+    #: mean, and a row cannot be read without knowing which it got.
+    samples: int = 0
 
 
 class DebateRecord(BaseModel):
@@ -135,6 +177,12 @@ class DebateRecord(BaseModel):
     debates actually converge rather than run out of budget, and how often is an
     apparent disagreement only wording? Neither is recoverable after the fact if
     it was not recorded at the time.
+
+    The same reasoning covers the comparability fields — ``engine``, ``models``,
+    ``tracing_enabled``, ``streamed_advisors``, ``residency_warning``,
+    ``max_rounds``. A row that cannot say how it was produced cannot be averaged
+    with any other row, and finding that out at analysis time means the runs are
+    gone.
     """
 
     debate_id: str
@@ -142,6 +190,11 @@ class DebateRecord(BaseModel):
     engine: str
     outcome: Outcome
     verdict: MagiVerdict
+    #: **Every turn, in the order it was spoken**, blind round first — not one
+    #: per advisor. The tally reads a single row (see ``tallied`` above), but the
+    #: transcript is what makes "read the final positions for novelty" possible
+    #: after the fact, and mode collapse is visible to the eye and invisible to
+    #: the arithmetic. See docs/agreement-bias.md § "Measuring whether it worked".
     turns: list[TurnRecord]
     rounds_used: int
     #: A ``TERMINATED_BY_*`` value from ``constants``: ``consensus``,
@@ -169,6 +222,26 @@ class DebateRecord(BaseModel):
     advisors_present: list[str] = Field(default_factory=list)
     models: dict[str, str] = Field(default_factory=dict)
     duration_s: float = 0.0
+    #: Which node produced the row. Two Pis, or a Pi and a MacBook, write to
+    #: databases that may later be concatenated, and CPU figures from different
+    #: boards must never be averaged together.
+    node_id: str = ""
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    #: The round budget this debate ran under. Raising it changes both the
+    #: number of chances to converge and the message budget at once, so a
+    #: convergence rate is uninterpretable without it.
+    max_rounds: int = 0
+    #: Advisors configured with ``stream: true``. Streaming moves per-chunk work
+    #: onto the node whose CPU is being measured, and removes the length retry,
+    #: so a run that mixed streamed and unstreamed advisors without recording
+    #: which is not comparable with one that did not.
+    streamed_advisors: list[str] = Field(default_factory=list)
+    #: Whether pre-flight warned that the inference host was not holding every
+    #: model resident. ``None`` when no recent pre-flight observed it. A debate
+    #: whose models were evicted mid-run measures storage rather than the
+    #: framework, and has to be excludable after the fact rather than silently
+    #: skewing the benchmark.
+    residency_warning: bool | None = None
 
     # Counted at the model client, so these include calls AutoGen makes on its
     # own behalf — notably SelectorGroupChat's speaker selection, which never
@@ -185,3 +258,6 @@ class DebateRecord(BaseModel):
     #: measured. A row that does not know whether it was traced cannot be
     #: compared with one that was.
     tracing_enabled: bool = False
+    #: What the debate cost the node. ``None`` when ``MAGI_METRICS_ENABLED=0``,
+    #: which is a real configuration and must not be confused with zero cost.
+    node: NodeCost | None = None

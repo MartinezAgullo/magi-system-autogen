@@ -16,7 +16,7 @@ import sys
 from magi import personas as personas_mod
 from magi.bus import Bus
 from magi.config import Settings
-from magi.constants import TOPIC_STATUS
+from magi.constants import PREFLIGHT_FRESH_S, TOPIC_STATUS
 from magi.orchestrator import Magi
 from magi.services import stream_view
 from magi.services.draft import Draft
@@ -24,6 +24,7 @@ from magi.services.stt import STTService, is_available
 from magi.services.telemetry import telemetry_service
 from magi.setup.setup_logs import setup_logging
 from magi.setup.setup_tracing import setup_tracing, shutdown_tracing
+from magi.store.debates import DebateStore
 from magi.supervision import supervise
 from magi.ui.server import start_ui
 
@@ -79,6 +80,34 @@ def _banner(settings: Settings, personas: personas_mod.PersonaSet) -> None:
     )
 
 
+async def _residency_warning(store: DebateStore, node_id: str) -> bool | None:
+    """What the last pre-flight said about model residency, if it is still true.
+
+    ``magi-preflight`` is a separate process that ``launch.sh`` runs seconds
+    before this one, so the database is the only channel between them. Its
+    verdict is accepted only while it is fresh: a node restarted a day later
+    with ``--skip-checks`` must record "nobody looked" rather than inherit
+    yesterday's all-clear, because the fact being carried is about the inference
+    host's memory right now.
+    """
+    run = await store.latest_preflight(node_id)
+    if run is None:
+        logger.info("  Residency: unknown — no pre-flight recorded for this node")
+        return None
+    if run.age_s > PREFLIGHT_FRESH_S:
+        logger.info(
+            "  Residency: unknown — the last pre-flight was %.0f min ago",
+            run.age_s / 60,
+        )
+        return None
+    if run.residency_warning:
+        logger.warning(
+            "  Residency: pre-flight warned — %s. Latency figures from this run "
+            "carry an asterisk and every debate row will say so.", run.detail,
+        )
+    return run.residency_warning
+
+
 async def run() -> None:
     settings = Settings()
     setup_logging(settings.log_level)
@@ -93,7 +122,20 @@ async def run() -> None:
 
     provider = setup_tracing(settings)
     bus = Bus()
-    magi = Magi(settings, personas, bus, tracer_provider=provider)
+
+    # Opened at boot rather than on the first debate: a database that cannot be
+    # created should say so while someone is still reading the log, not three
+    # minutes into the first question anyone asks.
+    store = DebateStore(settings.db_path)
+    await store.open()
+    residency = await _residency_warning(store, settings.node_id)
+
+    magi = Magi(
+        settings, personas, bus,
+        tracer_provider=provider,
+        store=store,
+        residency_warning=residency,
+    )
 
     # The draft is owned here, not by the UI app, because it is node state: the
     # kiosk and any other client are two views of the same composed question.

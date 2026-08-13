@@ -209,3 +209,111 @@ async def test_an_advisor_missing_from_the_blind_round_does_not_hold_the_row_bac
 
     assert result.tallied_round == 2
     assert set(result.turns) == {"MELCHIOR", "BALTHASAR"}
+
+
+# ── The transcript ───────────────────────────────────────────────────────────
+#
+# The tally reads one row. The record keeps all of them, and the two are not the
+# same thing: the row is the result, the transcript is the evidence, and mode
+# collapse — three advisors reproducing each other's sentences — is visible only
+# in the second one. The bug these replace kept the last turn per advisor and
+# stamped every one of them with the final round, so a three-round debate was
+# recorded as three advisors speaking once each, in the last round.
+
+
+async def test_the_transcript_keeps_every_turn_in_the_order_it_was_spoken(
+    personas, monkeypatch
+):
+    _stub_phase_b(
+        monkeypatch,
+        [
+            msg("MELCHIOR", [], "M r2"),
+            msg("BALTHASAR", [], "B r2"),
+            msg("CASPAR", [], "C r2"),
+            msg("MELCHIOR", [], "M r3"),
+            msg("BALTHASAR", [], "B r3"),
+            msg("CASPAR", [], "C r3"),
+        ],
+    )
+    magi = Magi(Settings(max_rounds=3), personas)
+
+    result = await magi._deliberate("q", BLIND)  # noqa: SLF001
+
+    assert [(t.advisor, t.round_index) for t in result.transcript] == [
+        ("MELCHIOR", 1), ("BALTHASAR", 1), ("CASPAR", 1),
+        ("MELCHIOR", 2), ("BALTHASAR", 2), ("CASPAR", 2),
+        ("MELCHIOR", 3), ("BALTHASAR", 3), ("CASPAR", 3),
+    ]
+    assert [t.turn.position for t in result.transcript[:3]] == [
+        "MELCHIOR blind", "BALTHASAR blind", "CASPAR blind",
+    ]
+
+
+async def test_the_turns_that_decided_the_outcome_are_the_ones_marked(
+    personas, monkeypatch
+):
+    """A turn that arrived after the row the tally read is still in the record —
+    it was generated, paid for and shown on the console. It must not be
+    mistakable for a vote that counted, or the transcript would appear to
+    contradict the outcome stored beside it."""
+    _stub_phase_b(
+        monkeypatch,
+        [
+            msg("MELCHIOR", ["BALTHASAR"], "M r2"),
+            msg("BALTHASAR", ["MELCHIOR"], "B r2"),
+            msg("CASPAR", [], "C r2"),
+            msg("MELCHIOR", [], "M r3"),
+        ],
+    )
+    magi = Magi(Settings(max_rounds=2), personas)
+
+    result = await magi._deliberate("q", BLIND)  # noqa: SLF001
+
+    tallied = [(t.advisor, t.round_index) for t in result.transcript if t.tallied]
+    assert tallied == [("MELCHIOR", 2), ("BALTHASAR", 2), ("CASPAR", 2)]
+    # The unanswered round-3 turn is kept, and kept out of the arithmetic.
+    assert result.transcript[-1].round_index == 3
+    assert result.transcript[-1].tallied is False
+
+
+async def test_a_consensus_row_is_marked_even_though_it_spans_two_rounds(
+    personas, monkeypatch
+):
+    """ConsensusTermination stops on each advisor's latest vote, so the row that
+    ended the debate sits at two different depths. Marking by advisor and round
+    would mark the wrong turns here; the marking follows the objects the tally
+    actually read."""
+    _stub_phase_b(
+        monkeypatch,
+        [
+            msg("MELCHIOR", [], "M r2"),
+            msg("BALTHASAR", ["MELCHIOR", "CASPAR"], "B r2"),
+            msg("CASPAR", ["MELCHIOR", "BALTHASAR"], "C r2"),
+            msg("MELCHIOR", ["BALTHASAR", "CASPAR"], "M r3"),
+        ],
+    )
+    magi = Magi(Settings(max_rounds=4), personas)
+
+    result = await magi._deliberate("q", BLIND)  # noqa: SLF001
+
+    assert result.terminated_by == TERMINATED_BY_CONSENSUS
+    assert {(t.advisor, t.round_index) for t in result.transcript if t.tallied} == {
+        ("MELCHIOR", 3), ("BALTHASAR", 2), ("CASPAR", 2),
+    }
+
+
+async def test_a_debate_that_never_deliberated_still_has_a_transcript(
+    personas, monkeypatch
+):
+    """Fewer than two advisors answered, so the group chat never ran. The blind
+    round is the whole debate and the whole record of it."""
+    _stub_phase_b(monkeypatch, [])
+    magi = Magi(Settings(), personas)
+
+    result = await magi._deliberate(  # noqa: SLF001
+        "q", {"MELCHIOR": BLIND["MELCHIOR"]}
+    )
+
+    assert [(t.advisor, t.round_index, t.tallied) for t in result.transcript] == [
+        ("MELCHIOR", 1, True)
+    ]

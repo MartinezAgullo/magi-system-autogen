@@ -252,7 +252,7 @@ function onVerdict(record) {
   // that connected mid-debate — or after it — has seen no `turn` frames, and
   // replay_last hands it only the verdict. Reading them from here is what makes
   // a late-joining kiosk show the same screen as one that watched throughout.
-  const finalTurn = new Map(record.turns.map((t) => [t.advisor, t.turn]));
+  const finalTurn = new Map(talliedTurns(record).map((t) => [t.advisor, t.turn]));
   for (const [name] of state.nodes) {
     if (!present.has(name)) {
       setNode(name, "absent", "no response from this node");
@@ -269,6 +269,25 @@ function onVerdict(record) {
 }
 
 /*
+  The turns the daemon actually tallied.
+
+  `record.turns` is the whole transcript, every round in the order it was
+  spoken, because that is what the benchmark record needs. The console wants the
+  row the outcome rests on, which is not simply the last turn per advisor: a
+  debate cut off by the budget has a final turn nobody answered, and one stopped
+  by consensus has three that sit at different depths. The daemon marks them, so
+  the screen and the arithmetic cannot disagree about which positions are final.
+
+  The fallback covers a record from before the flag existed, where showing the
+  last turn per advisor is the old behaviour and still better than a blank panel.
+*/
+function talliedTurns(record) {
+  const turns = record.turns || [];
+  const tallied = turns.filter((t) => t.tallied);
+  return tallied.length ? tallied : turns;
+}
+
+/*
   Who ended up in the agreeing bloc, recomputed from the turns.
 
   The daemon's tally is authoritative and is what produced `outcome`; this only
@@ -281,7 +300,7 @@ function blocOf(record) {
   if (record.outcome === "UNANIMOUS") return present;
 
   const claims = new Map();
-  for (const t of record.turns) {
+  for (const t of talliedTurns(record)) {
     claims.set(t.advisor, new Set(
       (t.turn.agrees_with || [])
         .map((n) => n.trim().toUpperCase())
