@@ -60,12 +60,19 @@ class MagiTurn(BaseModel):
             "through a speaker. No lists, no markdown."
         )
     )
+    # The bar here is deliberately the same one the judge applies to a split
+    # vote: would acting on their position lead somewhere materially different?
+    # It used to read "would actively defend", which is a third copy of a rule
+    # the system prompt and the deliberation seed also state, and the strictest
+    # of the three wins in practice. See docs/agreement-bias.md § (d).
     agrees_with: list[str] = Field(
         default_factory=list,
         description=(
-            "Names of the other advisors whose position you would actively "
-            "defend. Leave empty in the first round, when you have not seen "
-            "them, or when you genuinely agree with none of them."
+            "Names of the other advisors whose position you could act on, even "
+            "if you would word it differently or add a caveat. Leave one out "
+            "when acting on it would lead somewhere materially different from "
+            "your own position. Leave empty in the first round, when you have "
+            "not seen them."
         ),
     )
     confidence: float = Field(

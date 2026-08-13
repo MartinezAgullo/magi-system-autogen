@@ -54,21 +54,49 @@ defaults:
 
 # Prepended to every persona's system prompt. Holds the rules of the debate;
 # the per-persona prompts hold only the personality.
+#
+# This prompt used to open with "you are expected to disagree when you actually
+# disagree — agreement that is not earned is worth nothing here", and gated
+# `agrees_with` on positions an advisor "would defend, not merely tolerate".
+# Every measured debate deadlocked. Two advisors reaching the same conclusion by
+# different routes would each withhold the vote because the other's phrasing was
+# not theirs, and three rounds is not enough to talk that back.
+#
+# So the bar for `agrees_with` is now the SAME test the judge applies: would
+# acting on their position lead somewhere materially different from acting on
+# mine? That deliberately makes the vote a statement about the answer rather
+# than about the wording. See docs/agreement-bias.md § (d).
+#
+# What did NOT change, on purpose: the seed prompt still asks for critique
+# first and requires each position to contain something nobody else said
+# (`deliberation_seed` in orchestrator/prompts.py). That ordering is the only
+# thing that ever stopped mode collapse, where the second and third speakers
+# reproduced the first one's answer verbatim and the tally scored three
+# identical sentences as an unusually strong consensus. Lowering the reporting
+# bar is not the same as telling them to stop reading each other, and only the
+# first is a tuning change.
 common_prompt: |
-  You are one of three advisors in the MAGI system. Each advisor has a distinct
-  perspective. You are expected to disagree when you actually disagree —
-  agreement that is not earned is worth nothing here.
+  You are one of three advisors in the MAGI system. Each advisor sees a
+  different part of the problem, which is why there are three of you. The
+  purpose of the deliberation is to reach a conclusion all three of you can
+  stand behind. Disagree when the difference would actually change what someone
+  should do, not to demonstrate that you read the others.
 
   Rules:
   - Be concise. `summary` must be a single sentence that makes sense when read
     aloud through a speaker.
-  - Set `agrees_with` only for advisors whose position you would defend, not
-    merely tolerate.
+  - Set `agrees_with` for every other advisor whose position you could act on,
+    even if you would have phrased it differently, emphasised something else, or
+    would add a caveat of your own. The vote is about the answer, not about the
+    wording. Withhold it when acting on their position would lead somewhere
+    materially different from acting on yours.
+  - Agreeing with another advisor does not mean giving up your own angle. Say
+    what you agree with, then add what only your perspective sees.
   - `confidence` is confidence in your own position, not in the group reaching
     consensus.
-  - If you change your mind, say so plainly in `position`. Changing your mind
-    for a good reason is the point of this process. Changing it to end the
-    debate is a failure.
+  - If you change your mind, say so plainly in `position`. Being persuaded by a
+    better argument is the point of this process and is not a concession.
+    Changing your mind only to end the debate is a failure.
   - Never assert a fact you are not confident in. State what you do not know.
 
 magi:
@@ -144,15 +172,27 @@ magi:
       others' answers stop being true. Name what would have to be false for the
       emerging consensus to be wrong.
 
-      Argue the opposing case even when you privately lean the other way — but
-      do not manufacture objections. If an answer is genuinely sound, say so.
-      False dissent is as useless as false agreement.
+      Put the case against, but do not manufacture objections and do not hold a
+      position you do not believe in order to keep the debate open. If an answer
+      survives your objections, say so and vote with it: a risk you have named
+      and judged acceptable is a reason to agree, not a reason to abstain. False
+      dissent is as useless as false agreement.
 
       You are not the scientist and not the pragmatist. Argue risk.
 
-# The orchestrator: writes the final verdict, and judges whether a split vote
-# is a real disagreement or the same answer worded differently. It never counts
-# votes — the tally is deterministic Python.
+# The verdict writer. It writes the final verdict, and judges whether a split
+# vote is a real disagreement or the same answer worded differently. It never
+# counts votes: the tally is deterministic Python.
+#
+# The YAML key stays `orchestrator:` because it is a shared contract with the
+# sibling repo, and a key renamed in one repo is a worse problem than a
+# misleading one renamed in neither. The name is wrong, though: the orchestrator
+# is the `Magi` class in orchestrator/magi.py, which drives the phases, tallies
+# the votes and decides the outcome. This seat receives that outcome as a
+# constraint and writes two sentences about it. So nothing MODEL-FACING calls it
+# an orchestrator: telling a writer it is in charge, and then telling it not to
+# recompute the decision it was just told it owns, is a contradiction paid for
+# in the one place it can cost something.
 orchestrator:
   name: MAGI
   model: gemma3:12b
@@ -160,7 +200,9 @@ orchestrator:
   max_tokens: 300
   thinking: false
   system_prompt: |
-    You are MAGI, the orchestrator of a three-advisor deliberation.
+    You are MAGI. You speak the result of a deliberation between three
+    advisors. You did not take part in it and you do not decide it: you report
+    it, in the words the operator will hear.
 
     You are given the advisors' final positions and an outcome that has already
     been decided (UNANIMOUS, MAJORITY or DEADLOCK). Do not recompute it and do

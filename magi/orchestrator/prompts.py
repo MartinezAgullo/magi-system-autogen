@@ -58,9 +58,13 @@ def deliberation_seed(
         "advisors is lost. Use your own words and your own angle even when you "
         "reach the same conclusion. If they changed your mind, say what changed "
         "it.\n\n"
-        "3. `agrees_with` — the OTHER advisors whose position you would defend "
-        "as your own, by exact name. Never list yourself. Agreeing with nobody "
-        "is a legitimate answer."
+        "3. `agrees_with` — the OTHER advisors, by exact name, whose position "
+        "you could act on. Different wording, different emphasis and a caveat "
+        "of your own are not disagreement: list them anyway. Leave one out only "
+        "if acting on their position would lead somewhere materially different "
+        "from acting on yours. Never list yourself. You can criticise an "
+        "advisor in `critique` and still agree with them here, and that "
+        "combination is common."
     )
 
 
@@ -122,14 +126,20 @@ def verdict_task(
     )
 
 
+# The threshold is "a materially different outcome", not "a different decision".
+# The stricter wording made any difference of degree substantive, which is most
+# of why split votes almost never got promoted. Loosening it is deliberately the
+# best-instrumented lever available: `judged_cosmetic` is on every DebateRecord,
+# so a rise in UNANIMOUS that comes from the judge stays distinguishable from one
+# where the advisors actually converged. See docs/agreement-bias.md § (b).
 JUDGE_SYSTEM_PROMPT = (
     "You decide one thing and nothing else: whether two or more advisors who "
     "did not formally agree are in fact saying the same thing in different "
     "words.\n\n"
-    "Answer SUBSTANTIVE if acting on one position would lead to a different "
-    "decision than acting on another. Answer COSMETIC only if the positions "
-    "would lead to the same action and differ in emphasis, vocabulary or "
-    "framing.\n\n"
+    "Answer SUBSTANTIVE if acting on one position would lead to a materially "
+    "different outcome than acting on another. Answer COSMETIC if the "
+    "positions would lead to broadly the same course of action and differ in "
+    "emphasis, vocabulary, framing or degree.\n\n"
     "Do not judge who is right. Do not add your own opinion on the question."
 )
 

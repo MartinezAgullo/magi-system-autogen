@@ -228,7 +228,7 @@ Every advisor uses the default `UnboundedChatCompletionContext`, so prompts grow
 
 ### 5.5 `confidence` is collected and never used
 
-It is on every `MagiTurn`, it is shown in the deliberation seed, and `tally()` ignores it completely. "A low-confidence dissent does not block consensus" is one of the more interesting rules available and needs no prompt change at all. Note the constraint: `tally()` is a shared contract with the sibling repo. See [agreement-bias.md](agreement-bias.md).
+It is on every `MagiTurn`, it is shown in the deliberation seed, and `tally()` ignores it completely. "A low-confidence dissent does not block consensus" is one of the more interesting rules available and needs no prompt change at all. Note the constraint: `tally()` is a shared contract with the sibling repo. See [agreement-bias.md](agreement-bias.md). Subsumed by §6, which is the version of this worth doing.
 
 ### 5.6 `confidence` has a range the model is not told about
 
@@ -242,10 +242,45 @@ The fix is a few words in the description: state 0.0 to 1.0 explicitly, with an 
 
 Worth pairing with §5.5, since anything that starts *using* `confidence` in the tally makes a silent 70-versus-0.7 confusion much more expensive than a rejected turn.
 
-### 5.7 The MAGI / `Magi` name collision
+### 5.7 The MAGI / `Magi` name collision — mostly closed
 
 `Magi` (the class in `orchestrator/magi.py`) orchestrates. `MAGI` (the `AssistantAgent`) writes two sentences for an outcome it is handed as a constraint. Same name, opposite amounts of authority.
 
-The boot banner has been fixed. It read `MAGI orchestrator gemma3:12b`, which told the operator a 12B model decided the verdict. Still open: the persona's own system prompt opens "You are MAGI, the orchestrator of a three-advisor deliberation", which tells a writer it is in charge and is then immediately contradicted by the next line. That one is sent to the model, so it is the one that might actually be costing something.
+The boot banner was fixed first. It read `MAGI orchestrator gemma3:12b`, which told the operator a 12B model decided the verdict. The model-facing half is now fixed too: the persona prompt opened "You are MAGI, the orchestrator of a three-advisor deliberation", telling a writer it was in charge and contradicting itself on the next line, and it now says it speaks a result it did not take part in and does not decide. That was the copy that could actually cost something, since it was the only one a model ever read.
 
-The YAML key `orchestrator:` is a shared contract and should probably stay, name collision and all. A renamed key that lands in only one repo is a worse problem than a confusing one that lands in both.
+What remains is the YAML key `orchestrator:`, which stays. It is a shared contract, and a key renamed in one repo is a worse problem than a misleading one renamed in neither. The comment above it in `config/magi.yaml` now says so, and says which of the two things called MAGI it refers to.
+
+---
+
+## 6. An agreement gradient, and actually using `confidence`
+
+Prompted by every measured debate ending in DEADLOCK. The prompt and judge levers for that are applied and documented in [agreement-bias.md](agreement-bias.md), §§ (b) and (d); this is the structural version of the same problem, and the one that needs a schema change rather than a wording change.
+
+### The problem
+
+`agrees_with` is hard set membership. An advisor can say "I agree with BALTHASAR" or say nothing, and there is no way to say "mostly, except on the cost argument". Every lever available today therefore operates on a binary, which is why tuning the system means tuning where a threshold sits in three separate prompts rather than letting the advisors report how close they actually are.
+
+Meanwhile `confidence` is already collected on every turn, already shown to the other advisors in the deliberation seed, and completely ignored by `tally()`. The system asks for a number, prints it, and throws it away.
+
+Those are two halves of one thing. A debate where MELCHIOR dissents at 0.3 confidence is not the same debate as one where it dissents at 0.9, and today they produce the identical DEADLOCK.
+
+### What it would look like
+
+Two pieces, and they are separable:
+
+1. **A graded `agrees_with`.** Either a score per advisor (`[{advisor: "BALTHASAR", agreement: 0.8}]`) replacing the bare name list, or a second field alongside it. `tally()` then forms blocs above a configurable threshold instead of on set membership, and the threshold becomes one number in `config.py` rather than three sentences spread across `common_prompt`, `deliberation_seed()` and the `MagiTurn` field description.
+2. **`confidence` in the tally.** The obvious rule is that a low-confidence dissent does not block consensus: if the lone dissenter is at 0.3 while the bloc is at 0.8, that is closer to a majority than to a deadlock, and today it reads as neither. This one needs no prompt change at all, only a change to `tally()`.
+
+### What it costs, and the two traps
+
+**`MagiTurn` is prompt surface, not plumbing.** Its field names and descriptions go to a 12B model as a JSON schema, so adding a field changes behaviour beyond the arithmetic that reads it. A nested object per advisor is also exactly the shape §"Consensus, the AutoGen way" in `CLAUDE.md` warns about: keep it shallow, keep every key fixed, and never key a mapping by advisor name.
+
+**The scale trap is already documented and already cost a debate.** See §5.6: `nemotron3:33b` returned `confidence: 70` meaning 70 %, pydantic rejected the turn, and MELCHIOR produced nothing in the blind round. A silent 70-versus-0.7 confusion is survivable while nothing reads the field. The moment `tally()` reads it, the same confusion produces a wrong outcome instead of a rejected turn, and it produces it silently. **§5.6 is a hard prerequisite for this item, not a companion to it.**
+
+**Both `MagiTurn` and `tally()` are shared contracts with the sibling repo.** This lands in both or in neither, which makes it one of the more expensive items in this file despite the small diff.
+
+### Why it is worth it anyway
+
+It replaces prompt tuning with a number. Everything applied so far moves the agreement bar by rewording instructions, which cannot be measured except by running debates and reading them, and which no two models interpret identically. A threshold over graded agreement is a knob with a value that can be swept, recorded on the debate row, and compared across engines and across repos, which is the kind of thing this project exists to produce.
+
+The honest counterargument: a model's self-reported 0.7 is not a calibrated probability, and a swept threshold over uncalibrated numbers looks far more rigorous than it is. Whatever ships should say so, and the sweep should be reported as tuning rather than as measurement.
